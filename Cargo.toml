@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "crates/latency-spike",
+  "crates/radio-core",
   "crates/radio-probe",
   "crates/urc200-proto",
   "crates/urc200-serial",

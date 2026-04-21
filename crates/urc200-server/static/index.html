@@ -43,11 +43,21 @@
   .tx-banner.show { display: block; }
   @keyframes tx-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.75; } }
 
-  .lcd { background: var(--lcd-bg); color: var(--lcd); padding: 18px 16px; border-radius: 6px; text-shadow: 0 0 6px rgba(255, 179, 0, 0.4); border: 1px solid #1f1908; }
+  .lcd { background: var(--lcd-bg); color: var(--lcd); padding: 18px 16px; border-radius: 6px; text-shadow: 0 0 6px rgba(255, 179, 0, 0.4); border: 1px solid #1f1908; cursor: ns-resize; user-select: none; }
+  .lcd.dialing { outline: 1px dashed var(--accent); outline-offset: -2px; }
   .lcd .primary { font-size: 34px; font-weight: 700; letter-spacing: 0.03em; line-height: 1; font-variant-numeric: tabular-nums; }
   .lcd .secondary { font-size: 13px; color: var(--fg-dim); margin-top: 6px; }
   .lcd .badge-row { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+  .lcd .dial-hint { font-size: 10px; color: var(--fg-dim); margin-top: 8px; letter-spacing: 0.05em; text-transform: uppercase; opacity: 0.6; }
   .badge { font-size: 11px; padding: 2px 8px; border: 1px solid currentColor; border-radius: 999px; opacity: 0.8; }
+
+  /* DSP sliders with twin number + range controls */
+  .dsp-row { display: grid; grid-template-columns: 52px 1fr 1fr 1fr; gap: 6px; align-items: center; font-size: 11px; margin-top: 3px; }
+  .dsp-row .label { font-weight: 700; color: var(--fg-dim); }
+  .dsp-cell { display: flex; align-items: center; gap: 4px; }
+  .dsp-cell input[type="checkbox"] { flex: 0 0 auto; }
+  .dsp-cell input[type="range"] { flex: 1; min-width: 0; accent-color: var(--accent); }
+  .dsp-cell .val { min-width: 46px; text-align: right; font-variant-numeric: tabular-nums; color: var(--accent); font-size: 10px; }
 
   .preset-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
   .preset { background: var(--panel-hi); border: 1px solid var(--line); color: var(--fg); font-family: inherit; font-size: 13px; padding: 12px 4px; border-radius: 6px; cursor: pointer; transition: border-color 0.15s, background 0.15s; min-height: 52px; }
@@ -142,10 +152,11 @@
   <div class="row" style="margin-bottom:12px; grid-template-columns: minmax(0,1fr) minmax(0,1.4fr); gap: 12px;">
     <div class="card">
       <h2>Active Channel</h2>
-      <div class="lcd">
+      <div class="lcd" id="lcd-dial" tabindex="0" title="scroll / drag / ↑↓ to tune · shift=×10 · ctrl=÷10">
         <div class="primary" id="freq-primary">—.————</div>
         <div class="secondary" id="freq-secondary">—</div>
         <div class="badge-row" id="badges"></div>
+        <div class="dial-hint">scroll or drag to tune · shift ×10 · ctrl ÷10</div>
       </div>
       <div class="kv" style="margin-top:10px">
         <span class="k">synth</span><span class="v" id="v-synth">–</span>
@@ -212,19 +223,47 @@
       </div>
       <div style="margin-top:12px; border-top:1px solid var(--line); padding-top:10px;">
         <div class="muted" style="margin-bottom:6px">DSP — applied server-side (biquad HPF → noise gate → LPF)</div>
-        <div style="display:grid; grid-template-columns: 60px 1fr 1fr 1fr; gap: 6px; align-items:center; font-size:11px;">
+        <div class="dsp-row">
           <div></div>
-          <div class="muted">HPF (Hz)</div>
-          <div class="muted">LPF (Hz)</div>
-          <div class="muted">Gate (dB)</div>
-          <div class="muted" style="font-weight:700">RX</div>
-          <div><label style="display:flex;gap:4px;align-items:center"><input type="checkbox" id="rx-hp-on" checked><input type="number" id="rx-hp-fc" value="300" min="20" max="8000" step="10" style="width:70px"></label></div>
-          <div><label style="display:flex;gap:4px;align-items:center"><input type="checkbox" id="rx-lp-on" checked><input type="number" id="rx-lp-fc" value="3000" min="200" max="20000" step="50" style="width:80px"></label></div>
-          <div><label style="display:flex;gap:4px;align-items:center"><input type="checkbox" id="rx-gate-on"><input type="number" id="rx-gate-db" value="-40" min="-80" max="-10" step="1" style="width:60px"></label></div>
-          <div class="muted" style="font-weight:700">TX</div>
-          <div><label style="display:flex;gap:4px;align-items:center"><input type="checkbox" id="tx-hp-on" checked><input type="number" id="tx-hp-fc" value="300" min="20" max="8000" step="10" style="width:70px"></label></div>
-          <div><label style="display:flex;gap:4px;align-items:center"><input type="checkbox" id="tx-lp-on" checked><input type="number" id="tx-lp-fc" value="3000" min="200" max="20000" step="50" style="width:80px"></label></div>
-          <div><label style="display:flex;gap:4px;align-items:center"><input type="checkbox" id="tx-gate-on"><input type="number" id="tx-gate-db" value="-40" min="-80" max="-10" step="1" style="width:60px"></label></div>
+          <div class="muted" style="text-align:center">HPF (Hz)</div>
+          <div class="muted" style="text-align:center">LPF (Hz)</div>
+          <div class="muted" style="text-align:center">Gate (dB)</div>
+        </div>
+        <div class="dsp-row">
+          <div class="label">RX</div>
+          <div class="dsp-cell">
+            <input type="checkbox" id="rx-hp-on" checked>
+            <input type="range" id="rx-hp-fc" min="20" max="1000" step="10" value="300">
+            <span class="val" id="rx-hp-fc-v">300</span>
+          </div>
+          <div class="dsp-cell">
+            <input type="checkbox" id="rx-lp-on" checked>
+            <input type="range" id="rx-lp-fc" min="800" max="8000" step="50" value="3000">
+            <span class="val" id="rx-lp-fc-v">3000</span>
+          </div>
+          <div class="dsp-cell">
+            <input type="checkbox" id="rx-gate-on">
+            <input type="range" id="rx-gate-db" min="-80" max="-10" step="1" value="-40">
+            <span class="val" id="rx-gate-db-v">-40</span>
+          </div>
+        </div>
+        <div class="dsp-row">
+          <div class="label">TX</div>
+          <div class="dsp-cell">
+            <input type="checkbox" id="tx-hp-on" checked>
+            <input type="range" id="tx-hp-fc" min="20" max="1000" step="10" value="300">
+            <span class="val" id="tx-hp-fc-v">300</span>
+          </div>
+          <div class="dsp-cell">
+            <input type="checkbox" id="tx-lp-on" checked>
+            <input type="range" id="tx-lp-fc" min="800" max="8000" step="50" value="3000">
+            <span class="val" id="tx-lp-fc-v">3000</span>
+          </div>
+          <div class="dsp-cell">
+            <input type="checkbox" id="tx-gate-on">
+            <input type="range" id="tx-gate-db" min="-80" max="-10" step="1" value="-40">
+            <span class="val" id="tx-gate-db-v">-40</span>
+          </div>
         </div>
       </div>
     </div>
@@ -791,6 +830,13 @@ fetch("/api/tx/ctcss").then(r => r.json()).then(j => {
 function bindFilters(side) {
   const on = (k) => document.getElementById(`${side}-${k}-on`);
   const v  = (k) => document.getElementById(`${side}-${k}`);
+  const lbl = (k) => document.getElementById(`${side}-${k}-v`);
+  let pushTimer = null;
+  const syncLabel = () => {
+    lbl("hp-fc").textContent = v("hp-fc").value;
+    lbl("lp-fc").textContent = v("lp-fc").value;
+    lbl("gate-db").textContent = v("gate-db").value;
+  };
   const push = async () => {
     const body = {
       hp_enabled: on("hp").checked,
@@ -809,11 +855,11 @@ function bindFilters(side) {
       logEvent(`${side} filters`, j);
     } catch (e) { logEvent(`${side} filters err`, { e: String(e) }); }
   };
-  ["hp", "lp", "gate"].forEach(k => {
-    on(k).onchange = push;
-  });
+  const debouncedPush = () => { clearTimeout(pushTimer); pushTimer = setTimeout(push, 120); };
+  ["hp", "lp", "gate"].forEach(k => { on(k).onchange = push; });
   ["hp-fc", "lp-fc", "gate-db"].forEach(k => {
-    v(k).onchange = push;
+    const el = v(k);
+    el.oninput = () => { syncLabel(); debouncedPush(); };
   });
   // Fetch current server state on load
   fetch(`/api/audio/filters/${side}`).then(r => r.json()).then(j => {
@@ -823,10 +869,104 @@ function bindFilters(side) {
     v("hp-fc").value = j.hp_fc.toFixed(0);
     v("lp-fc").value = j.lp_fc.toFixed(0);
     v("gate-db").value = j.gate_db.toFixed(0);
+    syncLabel();
   }).catch(() => {});
 }
 bindFilters("rx");
 bindFilters("tx");
+
+// =============================================================
+// LCD tuning dial — scroll wheel + arrow keys + touch drag on the
+// Active Channel readout. Emits one /api/command/tune per change,
+// debounced, with the currently-selected Step as the increment.
+// =============================================================
+const lcdDial = document.getElementById("lcd-dial");
+let dialRxMhz = null;            // local pending value while dialing
+let dialTxOffset = 0;             // tx = rx + offset (preserve split during dial)
+let dialTimer = null;
+let dragLastY = null;
+let dragAccum = 0;
+
+function dialStepHz() {
+  // Use the Manual Tune step picker as the "tuning grid" for the dial.
+  const s = tuneStep.value;
+  if (s === "25k") return 25_000;
+  if (s === "12.5k" || s === "12_5k") return 12_500;
+  return 5_000;
+}
+
+function dialKickPush() {
+  clearTimeout(dialTimer);
+  dialTimer = setTimeout(async () => {
+    if (dialRxMhz == null) return;
+    const rx_hz = Math.round(dialRxMhz * 1e6);
+    const tx_hz = rx_hz + Math.round(dialTxOffset);
+    await apiPost("/api/command/tune", { rx_hz, tx_hz, step: tuneStep.value });
+    dialRxMhz = null;  // release control back to telemetry
+  }, 180);
+}
+
+function dialStepBy(delta_hz) {
+  if (!lcdDial) return;
+  // Seed from last known snapshot on first dial move.
+  if (dialRxMhz == null) {
+    const seed = activeSnapshot ? activeSnapshot.rx_mhz : parseFloat(document.getElementById("freq-primary").textContent);
+    if (!isFinite(seed)) return;
+    dialRxMhz = seed;
+    dialTxOffset = activeSnapshot
+      ? Math.round((activeSnapshot.tx_mhz - activeSnapshot.rx_mhz) * 1e6)
+      : 0;
+  }
+  dialRxMhz = Math.max(0, dialRxMhz + delta_hz / 1e6);
+  // Snap to step grid.
+  const step_mhz = dialStepHz() / 1e6;
+  dialRxMhz = Math.round(dialRxMhz / step_mhz) * step_mhz;
+  // Visual-only update of the LCD until the POST lands.
+  document.getElementById("freq-primary").textContent = dialRxMhz.toFixed(4);
+  lcdDial.classList.add("dialing");
+  setTimeout(() => lcdDial.classList.remove("dialing"), 260);
+  dialKickPush();
+}
+
+lcdDial.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const base = dialStepHz();
+  // wheel delta: typical notch is ~100 for mice. Negative = up.
+  const notches = Math.sign(-e.deltaY) * Math.max(1, Math.round(Math.abs(e.deltaY) / 100));
+  const mult = e.shiftKey ? 10 : e.ctrlKey ? 0.1 : 1;
+  const delta = notches * base * mult;
+  dialStepBy(delta);
+}, { passive: false });
+
+lcdDial.addEventListener("keydown", (e) => {
+  const base = dialStepHz();
+  const mult = e.shiftKey ? 10 : e.ctrlKey ? 0.1 : 1;
+  if (e.key === "ArrowUp" || e.key === "ArrowRight") { e.preventDefault(); dialStepBy( base * mult); }
+  if (e.key === "ArrowDown" || e.key === "ArrowLeft") { e.preventDefault(); dialStepBy(-base * mult); }
+  if (e.key === "PageUp")   { e.preventDefault(); dialStepBy( base * 100); }
+  if (e.key === "PageDown") { e.preventDefault(); dialStepBy(-base * 100); }
+});
+
+// Touch / pointer drag — vertical movement increments. One dial-step per 8 px.
+lcdDial.addEventListener("pointerdown", (e) => {
+  dragLastY = e.clientY; dragAccum = 0;
+  lcdDial.setPointerCapture(e.pointerId);
+});
+lcdDial.addEventListener("pointermove", (e) => {
+  if (dragLastY == null) return;
+  const dy = e.clientY - dragLastY;
+  dragLastY = e.clientY;
+  dragAccum -= dy;  // drag up = positive
+  const pxPerNotch = 8;
+  while (Math.abs(dragAccum) >= pxPerNotch) {
+    const sign = Math.sign(dragAccum);
+    dragAccum -= sign * pxPerNotch;
+    dialStepBy(sign * dialStepHz());
+  }
+});
+const endDrag = (e) => { dragLastY = null; dragAccum = 0; try { lcdDial.releasePointerCapture(e.pointerId); } catch {} };
+lcdDial.addEventListener("pointerup", endDrag);
+lcdDial.addEventListener("pointercancel", endDrag);
 
 // Test tone — 1s 440Hz sine. Proves the AudioContext can output.
 document.getElementById("aud-test").onclick = async () => {

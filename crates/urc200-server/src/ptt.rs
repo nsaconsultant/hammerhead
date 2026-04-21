@@ -397,6 +397,35 @@ mod tests {
         radio.shutdown().await;
     }
 
+    /// Defends the behavior that already works: when the PTT arbiter shuts
+    /// down while keyed, the radio is unkeyed *quickly*. Murat's priority test
+    /// — locks down the invariant that currently survives only because real use
+    /// beat it in. Every future driver inherits this assertion via the
+    /// conformance suite (radio-core).
+    #[tokio::test]
+    async fn shutdown_while_keyed_unkeys_within_500ms() {
+        let (ptt, _task, radio) = spawn_arbiter(2); // B, E (shutdown)
+        let mut sub = ptt.subscribe();
+        ptt.start("c1".into(), "alice".into()).await;
+        let _ = sub.recv().await.unwrap(); // Acquired
+        let t0 = std::time::Instant::now();
+        ptt.shutdown().await;
+        // Shutdown returns only after the arbiter task has emitted E and
+        // ReleaseReason::ServerShutdown — so the measurement bounds the
+        // whole unkey-on-shutdown path, transport write included.
+        let elapsed = t0.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "unkey took {elapsed:?}, expected < 500ms"
+        );
+        let ev = sub.recv().await.unwrap();
+        assert!(matches!(
+            ev,
+            PttEvent::Released { reason: ReleaseReason::ServerShutdown, .. }
+        ));
+        radio.shutdown().await;
+    }
+
     #[tokio::test]
     async fn shutdown_releases_if_held() {
         let (ptt, _task, radio) = spawn_arbiter(2); // B, E (shutdown)
