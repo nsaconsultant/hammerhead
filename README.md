@@ -25,7 +25,7 @@ The radio lives in the rack with its RS-232 cable and the GD USB Audio Adapter (
 - **Push-to-talk** — tap-and-hold on the on-screen pad or spacebar. Default-locked toggle prevents accidental keying. When armed, your browser mic is captured via AudioWorklet, streamed server-side, and written to the UAA playback PCM (radio's mic input). Heartbeat watchdog unkeys within 400 ms of any network or browser dropout. RX playback is auto-muted on the keying client to suppress the UAA's internal sidetone feedback loop.
 - **CTCSS tone encoder in software** — the URC-200's base-band firmware doesn't encode CTCSS. Since the software owns the mic audio path, it mixes a selectable tone (67.0 - 254.1 Hz, all 50 EIA standards) into the outgoing mono stream. Tone amplitude is adjustable. Applied continuously for the duration of PTT, same as an inline hardware encoder.
 - **Server-side DSP** — biquad HPF / noise gate / LPF on both RX (cleans UAA output before shipping to browser) and TX (cleans mic audio before writing to UAA, *before* CTCSS mix so the sub-audible tone isn't high-passed away). All live-tunable from sliders in the UI.
-- **RSPdx / SoapySDR waterfall** (optional) — when the server is built with the `sdr` feature, a standalone `/waterfall.html` page opens a live spectrum + waterfall from any SoapySDR-compatible device. Click-to-tune sends a retune over the waterfall WS. Designed to pop out in its own window on a second monitor next to the main UI. Off by default so the default build needs no SDR toolchain.
+- **RSPdx / SoapySDR waterfall** (optional) — when the server is built with the `sdr` feature, a standalone `/waterfall.html` page opens a live spectrum + waterfall from any SoapySDR-compatible device. Always-visible MHz ruler with auto-nice tick spacing. Display-side zoom (1×–32×) lets you drill in on a narrow slice without changing the SDR sample rate. Plain click on the spectrum tunes the **URC-200** to that frequency (simplex, 5 kHz snap) via the existing `/api/command/tune` path; a green marker tracks where the radio is actually tuned via the telemetry WS. Shift-click (or the `SDR ⟲` / `SDR → radio` buttons) recenters the SDR viewer independently, so you can pan around without moving the demodulator. Designed to pop out in its own window on a second monitor next to the main UI. Off by default so the default build needs no SDR toolchain.
 - **Single-operator lock** — multiple browsers can observe telemetry and hear RX audio; only one holds PTT at a time. First press wins; second client sees an "in use by …" state.
 
 ## Hardware
@@ -191,7 +191,20 @@ BINDGEN_EXTRA_CLANG_ARGS='-I/usr/lib/gcc/x86_64-linux-gnu/13/include' \
 | `URC_SDR_DEVICE` | `driver=sdrplay`   | SoapySDR device-args string. e.g. `driver=rtlsdr`, `driver=sdrplay,serial=24051CD970` |
 | `URC_SDR_CENTER` | `251950000`        | Start-up center frequency in Hz. Retuned live from the UI. |
 
-**Using it:** with the server running, the main UI header shows a `Waterfall ↗` link (hidden when the feature isn't compiled in). Click it — it opens `/waterfall.html` as a named window target, so it lands on whichever monitor you last dragged it to. Click the spectrum or waterfall to retune; type a MHz value and press Enter to jump; pick a gain from the dropdown or leave it on auto AGC.
+**Using it:** with the server running, the main UI header shows a `Waterfall ↗` link (hidden when the feature isn't compiled in). Click it — it opens `/waterfall.html` as a named window target, so it lands on whichever monitor you last dragged it to. Controls:
+
+| action                             | effect                                                             |
+|------------------------------------|--------------------------------------------------------------------|
+| plain click on spectrum/waterfall  | tune the URC-200 to that frequency (RX = TX, 5 kHz grid)           |
+| shift-click on spectrum/waterfall  | recenter the SDR window on that frequency (radio untouched)        |
+| type MHz + **Tune radio**          | tune the URC-200                                                   |
+| type MHz + **SDR ⟲**               | recenter the SDR window only                                       |
+| **SDR → radio** button             | recenter the SDR on the URC-200's current RX frequency             |
+| **zoom** dropdown (1× … 32×)       | display-side zoom — slices the FFT we already have, no SDR churn   |
+| **gain** dropdown                  | auto AGC or fixed 30/40/50/60 dB                                   |
+| hover                              | cursor line + live MHz readout                                     |
+
+The green ◆ on the spectrum and its label track where the URC-200 is actually tuned (subscribed to the same `/api/ws/telemetry` the main UI uses).
 
 ## Caveats
 

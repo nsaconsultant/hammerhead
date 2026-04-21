@@ -138,15 +138,25 @@ async fn handle(mut socket: WebSocket, sdr: SdrHandle) {
                 Some(Ok(Message::Close(_))) => break,
                 // Accept client text messages as retune requests: {"center_hz": 251950000}
                 Some(Ok(Message::Text(text))) => {
-                    if let Ok(req) = serde_json::from_str::<SdrConfigReq>(&text) {
-                        if let Some(hz) = req.center_hz {
-                            sdr.capture.set_center(hz).await;
-                        }
-                        match req.gain_mode.as_deref() {
-                            Some("auto") => sdr.capture.set_gain(None).await,
-                            _ => if let Some(g) = req.gain_db {
-                                sdr.capture.set_gain(Some(g)).await;
+                    match serde_json::from_str::<SdrConfigReq>(&text) {
+                        Ok(req) => {
+                            if let Some(hz) = req.center_hz {
+                                info!(center_hz = hz, "waterfall ws retune");
+                                sdr.capture.set_center(hz).await;
                             }
+                            match req.gain_mode.as_deref() {
+                                Some("auto") => {
+                                    info!("waterfall ws gain=auto");
+                                    sdr.capture.set_gain(None).await;
+                                }
+                                _ => if let Some(g) = req.gain_db {
+                                    info!(gain_db = g, "waterfall ws gain=fixed");
+                                    sdr.capture.set_gain(Some(g)).await;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, raw = %text, "waterfall ws bad text msg");
                         }
                     }
                 }

@@ -20,8 +20,8 @@
                height: 100%; overflow: hidden; }
   #toolbar {
     position: fixed; top: 0; left: 0; right: 0; z-index: 10;
-    display: flex; align-items: center; gap: 12px;
-    padding: 6px 10px; background: rgba(11,16,20,0.85); backdrop-filter: blur(6px);
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 6px 10px; background: rgba(11,16,20,0.9); backdrop-filter: blur(6px);
     border-bottom: 1px solid var(--line);
     font-size: 12px;
   }
@@ -45,12 +45,17 @@
   #toolbar .dot.bad { background: #e54848; }
   #toolbar .spacer { flex: 1; }
 
-  /* Two-layer canvas: live spectrum row up top, scrolling waterfall below. */
-  #wrap { position: absolute; top: 34px; left: 0; right: 0; bottom: 0; }
-  #spec { position: absolute; top: 0; left: 0; width: 100%; height: 120px;
-          background: #050505; border-bottom: 1px solid var(--line); }
-  #wf   { position: absolute; top: 120px; left: 0; right: 0; bottom: 0;
-          width: 100%; image-rendering: pixelated; }
+  /* Stack: live spectrum row up top, frequency ruler strip, scrolling
+     waterfall below. The `top` of #wrap is set dynamically in JS so a
+     flex-wrapped toolbar (extra controls on narrow screens) doesn't
+     overlap the spectrum. */
+  #wrap { position: absolute; left: 0; right: 0; bottom: 0; }
+  #spec  { position: absolute; top: 0;   left: 0; width: 100%; height: 120px;
+           background: #050505; border-bottom: 1px solid var(--line); }
+  #ruler { position: absolute; top: 120px; left: 0; width: 100%; height: 22px;
+           background: #0a0f14; border-bottom: 1px solid var(--line); }
+  #wf    { position: absolute; top: 142px; left: 0; right: 0; bottom: 0;
+           width: 100%; image-rendering: pixelated; }
   #cursor { position: absolute; top: 0; bottom: 0; width: 1px;
             background: rgba(255,179,0,0.55); pointer-events: none; display: none; }
   #cursor-label { position: absolute; top: 0; background: rgba(0,0,0,0.7);
@@ -72,12 +77,24 @@
     <span class="kv">span <b id="t-span">—</b> kHz</span>
     <span class="kv">fps <b id="t-fps">—</b></span>
     <span class="spacer"></span>
-    <label>tune
-      <input type="number" id="tune-input" step="0.001" placeholder="MHz">
+    <label>MHz
+      <input type="number" id="tune-input" step="0.005" placeholder="e.g. 251.950">
     </label>
-    <button id="tune-btn">Tune</button>
+    <button id="tune-btn" title="Tune the URC-200 radio (RX = TX)">Tune radio</button>
+    <button id="sdr-center-btn" title="Recenter the SDR window on this frequency">SDR ⟲</button>
+    <button id="sdr-follow-btn" title="Recenter the SDR on the URC-200's current RX frequency">SDR → radio</button>
+    <label>zoom
+      <select id="zoom-sel" style="width:80px">
+        <option value="1">1× (full)</option>
+        <option value="2">2×</option>
+        <option value="4">4×</option>
+        <option value="8">8×</option>
+        <option value="16">16×</option>
+        <option value="32">32×</option>
+      </select>
+    </label>
     <label>gain
-      <select id="gain-sel">
+      <select id="gain-sel" style="width:80px">
         <option value="auto">auto</option>
         <option value="30">30 dB</option>
         <option value="40">40 dB</option>
@@ -89,6 +106,7 @@
 
   <div id="wrap">
     <canvas id="spec"></canvas>
+    <canvas id="ruler"></canvas>
     <canvas id="wf"></canvas>
     <div id="cursor"></div>
     <div id="cursor-label"></div>
@@ -105,27 +123,43 @@
   const tuneInput = document.getElementById("tune-input");
   const tuneBtn = document.getElementById("tune-btn");
   const gainSel = document.getElementById("gain-sel");
+  const zoomSel = document.getElementById("zoom-sel");
   const empty = document.getElementById("empty");
   const spec = document.getElementById("spec");
+  const ruler = document.getElementById("ruler");
   const wf = document.getElementById("wf");
   const cursor = document.getElementById("cursor");
   const cursorLabel = document.getElementById("cursor-label");
   const sctx = spec.getContext("2d");
+  const rctx = ruler.getContext("2d");
   const wctx = wf.getContext("2d");
 
   // Offscreen scroll buffer so the waterfall can shift-and-draw cheaply.
   const scratch = document.createElement("canvas");
   const xctx = scratch.getContext("2d");
 
-  let ws = null;
+  let ws = null;        // waterfall (binary FFT)
+  let telWs = null;     // telemetry (URC-200 state) — used only for the marker
   let state = {
     center_hz: 0,
     sample_rate: 0,
     fft_size: 0,
-    lastFrameAt: 0,
+    zoom: 1, // display-side zoom factor; 1 = full span, 2 = center 50%, etc.
+    radio_rx_hz: 0, // URC-200 current RX, for the tuned-frequency marker
     frameCount: 0,
     fpsWindowAt: performance.now(),
   };
+
+  // Compute the visible [low, high] Hz bounds of the current zoom window.
+  function visibleRange() {
+    if (!state.sample_rate || !state.center_hz) return null;
+    const visSpan = state.sample_rate / state.zoom;
+    return {
+      low:  state.center_hz - visSpan / 2,
+      high: state.center_hz + visSpan / 2,
+      span: visSpan,
+    };
+  }
 
   // Iron palette — dark → red → yellow → white. Used by both the spectrum
   // fill and the waterfall.
@@ -153,24 +187,127 @@
   })();
 
   function resize() {
-    const w = wf.clientWidth, hTop = spec.clientHeight, hBot = wf.clientHeight;
+    // Toolbar can wrap onto 2+ rows on narrow screens; measure it each resize
+    // so the spectrum doesn't slide under the title bar.
+    const toolbar = document.getElementById("toolbar");
+    const wrap = document.getElementById("wrap");
+    const topOffset = toolbar ? toolbar.offsetHeight : 34;
+    if (wrap) wrap.style.top = `${topOffset}px`;
+    const w = wf.clientWidth, hTop = spec.clientHeight, hBot = wf.clientHeight, hRul = ruler.clientHeight;
     const dpr = Math.max(1, window.devicePixelRatio || 1);
     spec.width  = Math.round(w * dpr);
     spec.height = Math.round(hTop * dpr);
+    ruler.width = Math.round(w * dpr);
+    ruler.height = Math.round(hRul * dpr);
     wf.width    = Math.round(w * dpr);
     wf.height   = Math.round(hBot * dpr);
     scratch.width = wf.width;
     scratch.height = wf.height;
     sctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    rctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     wctx.setTransform(1, 0, 0, 1, 0, 0); // pixel space for blit
     wctx.fillStyle = "#000"; wctx.fillRect(0, 0, wf.width, wf.height);
+    drawRuler();
   }
   window.addEventListener("resize", resize);
+
+  // Pick a "nice" tick spacing in Hz given a visible span in Hz. Always one of
+  // {1, 2, 5} × 10^k so labels land on readable values.
+  function niceStep(spanHz, approxTicks) {
+    const raw = spanHz / approxTicks;
+    const pow10 = Math.pow(10, Math.floor(Math.log10(raw)));
+    const m = raw / pow10;
+    let step;
+    if (m < 1.5) step = 1;
+    else if (m < 3.5) step = 2;
+    else if (m < 7.5) step = 5;
+    else step = 10;
+    return step * pow10;
+  }
+
+  function formatHz(hz) {
+    // Pick enough decimals for the current tick spacing.
+    const mhz = hz / 1e6;
+    if (Math.abs(mhz) >= 100) return mhz.toFixed(3);
+    if (Math.abs(mhz) >= 10) return mhz.toFixed(4);
+    return mhz.toFixed(5);
+  }
+
+  function drawRuler() {
+    const W = ruler.clientWidth, H = ruler.clientHeight;
+    rctx.fillStyle = "#0a0f14"; rctx.fillRect(0, 0, W, H);
+    const v = visibleRange();
+    if (!v) return;
+
+    // Gridline above the ruler + a dark baseline at the bottom.
+    rctx.strokeStyle = "#222b33"; rctx.lineWidth = 1;
+    rctx.beginPath(); rctx.moveTo(0, 0); rctx.lineTo(W, 0); rctx.stroke();
+
+    const step = niceStep(v.span, W / 90); // ~90 px per label
+    const first = Math.ceil(v.low / step) * step;
+    rctx.font = "10px ui-monospace, Consolas, monospace";
+    rctx.textAlign = "center";
+    rctx.textBaseline = "top";
+
+    for (let hz = first; hz <= v.high; hz += step) {
+      const x = ((hz - v.low) / v.span) * W;
+      rctx.strokeStyle = "#3d4852";
+      rctx.beginPath(); rctx.moveTo(x, 0); rctx.lineTo(x, 6); rctx.stroke();
+      rctx.fillStyle = "#a49470";
+      rctx.fillText(`${formatHz(hz)}`, x, 7);
+    }
+
+    // Minor ticks — 5 between majors.
+    rctx.strokeStyle = "#1d2530";
+    const minor = step / 5;
+    const mFirst = Math.ceil(v.low / minor) * minor;
+    for (let hz = mFirst; hz <= v.high; hz += minor) {
+      const x = ((hz - v.low) / v.span) * W;
+      rctx.beginPath(); rctx.moveTo(x, 0); rctx.lineTo(x, 3); rctx.stroke();
+    }
+
+    // SDR center crosshair — dim, since it's the window, not the receiver.
+    if (v.low <= state.center_hz && state.center_hz <= v.high) {
+      const x = ((state.center_hz - v.low) / v.span) * W;
+      rctx.strokeStyle = "rgba(212,174,74,0.4)";
+      rctx.beginPath(); rctx.moveTo(x, 0); rctx.lineTo(x, H); rctx.stroke();
+    }
+  }
+
+  // Draw the URC-200 tuned-frequency marker as a bright vertical line that
+  // crosses the spectrum row + waterfall. Re-rendered every frame because
+  // the waterfall scroll clobbers it otherwise.
+  function drawRadioMarker() {
+    const v = visibleRange();
+    if (!v || !state.radio_rx_hz) return;
+    if (state.radio_rx_hz < v.low || state.radio_rx_hz > v.high) return;
+    const W = spec.clientWidth;
+    const frac = (state.radio_rx_hz - v.low) / v.span;
+    const x = frac * W;
+
+    sctx.strokeStyle = "rgba(90,211,100,0.85)";
+    sctx.lineWidth = 1;
+    sctx.beginPath(); sctx.moveTo(x, 0); sctx.lineTo(x, spec.clientHeight); sctx.stroke();
+
+    sctx.fillStyle = "rgba(90,211,100,0.95)";
+    sctx.font = "10px ui-monospace, Consolas, monospace";
+    sctx.textBaseline = "top";
+    sctx.textAlign = frac > 0.88 ? "right" : "left";
+    const lx = frac > 0.88 ? x - 4 : x + 4;
+    sctx.fillText(`◆ URC-200  ${formatHz(state.radio_rx_hz)} MHz`, lx, 4);
+  }
 
   function drawFrame(bins, centerHz, sampleRate) {
     const n = bins.length;
     if (n === 0) return;
     const W = spec.clientWidth, H = spec.clientHeight;
+
+    // Slice to zoom window. Full span = fft_size bins covering sampleRate Hz
+    // centered on centerHz; zoom=N shows the middle 1/N slice.
+    const zoom = Math.max(1, state.zoom | 0);
+    const sliceN = Math.max(2, Math.floor(n / zoom));
+    const sliceStart = Math.floor((n - sliceN) / 2);
+    const slice = bins.subarray(sliceStart, sliceStart + sliceN);
 
     // Spectrum row: live line.
     sctx.fillStyle = "#050505"; sctx.fillRect(0, 0, W, H);
@@ -180,9 +317,9 @@
       sctx.beginPath(); sctx.moveTo(0, y); sctx.lineTo(W, y); sctx.stroke();
     }
     sctx.strokeStyle = "#ffb300"; sctx.lineWidth = 1.5; sctx.beginPath();
-    for (let i = 0; i < n; i++) {
-      const x = (i / (n - 1)) * W;
-      const y = H - (bins[i] / 255) * H;
+    for (let i = 0; i < sliceN; i++) {
+      const x = (i / (sliceN - 1)) * W;
+      const y = H - (slice[i] / 255) * H;
       if (i === 0) sctx.moveTo(x, y); else sctx.lineTo(x, y);
     }
     sctx.stroke();
@@ -196,8 +333,8 @@
 
     const img = wctx.createImageData(Wpx, 1);
     for (let x = 0; x < Wpx; x++) {
-      const i = Math.floor((x / Wpx) * n);
-      const v = bins[i];
+      const i = Math.floor((x / Wpx) * sliceN);
+      const v = slice[i];
       const pi = v * 4;
       img.data[x*4+0] = palette[pi+0];
       img.data[x*4+1] = palette[pi+1];
@@ -206,9 +343,13 @@
     }
     wctx.putImageData(img, 0, 0);
 
-    // Header readouts.
+    // Header readouts — show the visible span, which is what the user cares
+    // about with zoom on.
     tCenter.textContent = (centerHz / 1e6).toFixed(4);
-    tSpan.textContent = (sampleRate / 1e3).toFixed(0);
+    tSpan.textContent = ((sampleRate / zoom) / 1e3).toFixed(0);
+
+    drawRadioMarker();
+    drawRuler();
   }
 
   function updateFps() {
@@ -274,20 +415,43 @@
     };
   }
 
-  // Click-to-tune: map x within the waterfall/spec to a frequency, send it.
-  function setTuneFromX(x, rect) {
-    if (!state.sample_rate || !state.center_hz) return;
+  // Map an on-screen x coordinate within the spec/waterfall/ruler to a
+  // visible-range frequency, snapped to the URC-200's 5 kHz grid.
+  function xToHz(x, rect) {
+    const v = visibleRange();
+    if (!v) return null;
     const frac = Math.min(1, Math.max(0, (x - rect.left) / rect.width));
-    const hz = state.center_hz - state.sample_rate / 2 + state.sample_rate * frac;
-    const rounded = Math.round(hz / 1000) * 1000;
-    sendRetune(rounded);
-    tuneInput.value = (rounded / 1e6).toFixed(4);
+    const hz = v.low + v.span * frac;
+    return Math.round(hz / 5000) * 5000;
   }
 
-  function sendRetune(hz) {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ center_hz: hz }));
+  // Tune the actual URC-200 (RX = TX = hz). Primary action on the waterfall
+  // page — clicking the spectrum or pressing the Tune button hits this.
+  async function tuneRadio(hz) {
+    try {
+      const res = await fetch("/api/command/tune", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rx_hz: hz, tx_hz: hz }),
+      });
+      if (!res.ok) {
+        const body = await res.text();
+        console.warn("URC-200 tune failed", res.status, body);
+      }
+    } catch (e) {
+      console.warn("URC-200 tune request error", e);
     }
+  }
+
+  // Recenter the SDR viewer. Leaves the URC-200 alone.
+  function recenterSdr(hz) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      console.warn("waterfall: ws not open; can't recenter SDR");
+      return;
+    }
+    ws.send(JSON.stringify({ center_hz: hz }));
+    state.center_hz = hz; // optimistic; confirmed by next frame header
+    drawRuler();
   }
 
   function sendGain() {
@@ -300,21 +464,33 @@
     }
   }
 
-  [spec, wf].forEach(el => {
+  [spec, wf, ruler].forEach(el => {
     el.addEventListener("click", (e) => {
       const rect = el.getBoundingClientRect();
-      setTuneFromX(e.clientX, rect);
+      const hz = xToHz(e.clientX, rect);
+      if (hz == null) return;
+      if (e.shiftKey) {
+        // Shift-click = recenter SDR on that frequency.
+        recenterSdr(hz);
+      } else {
+        // Plain click = tune the URC-200 there. Update the input so the
+        // user sees what was sent and can tweak/re-fire.
+        tuneInput.value = (hz / 1e6).toFixed(4);
+        state.radio_rx_hz = hz; // optimistic marker; telemetry will confirm
+        tuneRadio(hz);
+      }
     });
     el.addEventListener("mousemove", (e) => {
-      if (!state.sample_rate || !state.center_hz) { cursor.style.display = "none"; cursorLabel.style.display = "none"; return; }
+      const v = visibleRange();
+      if (!v) { cursor.style.display = "none"; cursorLabel.style.display = "none"; return; }
       const rect = el.getBoundingClientRect();
       const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
-      const hz = state.center_hz - state.sample_rate / 2 + state.sample_rate * frac;
+      const hz = v.low + v.span * frac;
       cursor.style.display = "block";
       cursor.style.left = `${e.clientX}px`;
       cursorLabel.style.display = "block";
       cursorLabel.style.left = `${e.clientX + 6}px`;
-      cursorLabel.textContent = `${(hz / 1e6).toFixed(4)} MHz`;
+      cursorLabel.textContent = `${formatHz(hz)} MHz`;
     });
     el.addEventListener("mouseleave", () => {
       cursor.style.display = "none";
@@ -322,15 +498,66 @@
     });
   });
 
+  function readTuneInputHz() {
+    const raw = (tuneInput.value || "").trim();
+    if (!raw) return null;
+    const mhz = parseFloat(raw);
+    if (isNaN(mhz) || mhz <= 0) {
+      console.warn("waterfall: bad tune input", raw);
+      return null;
+    }
+    return Math.round((mhz * 1e6) / 5000) * 5000; // 5 kHz snap
+  }
+
   tuneBtn.addEventListener("click", () => {
-    const mhz = parseFloat(tuneInput.value);
-    if (!isNaN(mhz) && mhz > 0) sendRetune(Math.round(mhz * 1e6));
+    const hz = readTuneInputHz();
+    if (hz == null) return;
+    state.radio_rx_hz = hz;
+    tuneRadio(hz);
   });
-  tuneInput.addEventListener("keydown", (e) => { if (e.key === "Enter") tuneBtn.click(); });
+  tuneInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); tuneBtn.click(); } });
+
+  document.getElementById("sdr-center-btn").addEventListener("click", () => {
+    const hz = readTuneInputHz();
+    if (hz != null) recenterSdr(hz);
+  });
+  document.getElementById("sdr-follow-btn").addEventListener("click", () => {
+    if (state.radio_rx_hz > 0) recenterSdr(state.radio_rx_hz);
+  });
+
   gainSel.addEventListener("change", sendGain);
+
+  zoomSel.addEventListener("change", () => {
+    state.zoom = Math.max(1, parseInt(zoomSel.value, 10) || 1);
+    // Clear the waterfall history — old pixels are at a different x→Hz mapping
+    // and would otherwise smear across the new zoom.
+    wctx.fillStyle = "#000"; wctx.fillRect(0, 0, wf.width, wf.height);
+    drawRuler();
+  });
+
+  // Telemetry subscription — we only watch `preset` events so we can draw
+  // the URC-200 tuned-frequency marker at the right spot.
+  function connectTelemetry() {
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    telWs = new WebSocket(`${proto}//${location.host}/api/ws/telemetry`);
+    telWs.onmessage = (ev) => {
+      try {
+        const m = JSON.parse(ev.data);
+        if (m.type === "preset") {
+          state.radio_rx_hz = Math.round(m.rx_mhz * 1e6);
+          if (!tuneInput.value) {
+            tuneInput.value = m.rx_mhz.toFixed(4);
+          }
+        }
+      } catch {}
+    };
+    telWs.onclose = () => setTimeout(connectTelemetry, 2000);
+    telWs.onerror = () => { /* onclose will retry */ };
+  }
 
   resize();
   connect();
+  connectTelemetry();
 })();
 </script>
 </body>
