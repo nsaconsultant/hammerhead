@@ -1,11 +1,14 @@
 ################ build ################
 FROM rust:1.84-bookworm AS builder
 
-# ALSA headers for cpal (audio comes in a later epic; the server itself doesn't
-# link libasound today, but the dep tree on `alsa-sys` compiles regardless and
-# this future-proofs Epic 4).
+# ALSA for the audio path; libsoapysdr-dev + clang for the optional `sdr`
+# feature's soapysdr-sys bindgen pass (stdbool.h lives inside the gcc include
+# dir, which we point bindgen at via BINDGEN_EXTRA_CLANG_ARGS).
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    clang \
     libasound2-dev \
+    libclang-dev \
+    libsoapysdr-dev \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
@@ -14,15 +17,27 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 
-RUN cargo build --release --locked -p urc200-server
+# Build with the SDR feature on. Needs BINDGEN_EXTRA_CLANG_ARGS so bindgen
+# can find stdbool.h (shipped with gcc, not clang, on bookworm).
+ENV BINDGEN_EXTRA_CLANG_ARGS=-I/usr/lib/gcc/x86_64-linux-gnu/12/include
+RUN cargo build --release --locked -p urc200-server --features sdr
 
 ################ runtime ################
 FROM debian:bookworm-slim
 
+# libsoapysdr0.8 covers both urc200-server and the SoapySDR module loader.
+# SDRplay-specific libs (libsdrplay_api + the libsdrPlaySupport Soapy module)
+# are bind-mounted from the host at runtime via docker-compose so we don't
+# have to bake the vendor API into the image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libasound2 \
+    libsoapysdr0.8 \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# Teach the dynamic linker about /usr/local/lib where the bind-mounted
+# libsdrplay_api.so lives.
+RUN echo '/usr/local/lib' > /etc/ld.so.conf.d/local.conf && ldconfig
 
 # Static assets served by the binary via ServeDir.
 COPY --from=builder /app/crates/urc200-server/static /opt/urc200/static
@@ -33,7 +48,8 @@ COPY --from=builder /app/target/release/urc200-server /usr/local/bin/urc200-serv
 ENV URC_STATIC=/opt/urc200/static \
     URC_BIND=0.0.0.0:3000 \
     URC_PORT=/dev/ttyUSB0 \
-    RUST_LOG=urc200_server=info,urc200_serial=info
+    RUST_LOG=urc200_server=info,urc200_serial=info,radio_sdr=info \
+    SOAPY_SDR_PLUGIN_PATH=/usr/local/lib/SoapySDR/modules0.8
 
 EXPOSE 3000
 ENTRYPOINT ["/usr/local/bin/urc200-server"]

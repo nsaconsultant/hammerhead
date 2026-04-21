@@ -4,6 +4,11 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: urc200-server
+    # Host networking: lets the container reach the SDRplay API daemon at
+    # 127.0.0.1:50000 on the host (the daemon owns the RSPdx USB device and
+    # our in-container SoapySDR module connects to it over TCP). Also means
+    # :3000 is exposed directly; no `ports:` mapping needed with host net.
+    network_mode: host
     # USB-serial + USB-audio passthrough. When the PL2303 re-enumerates (USB
     # hiccup, container restart), Linux sometimes bumps the tty number. Pass
     # the first several through so the server can auto-pick whichever exists.
@@ -17,15 +22,23 @@ services:
     volumes:
       - ./crates/urc200-server/static:/opt/urc200/static:ro
       - urc200-data:/var/lib/urc200
+      # SDRplay API + Soapy bridge bind-mounted from the host so we don't bake
+      # the vendor installer into the image. Updates on the host flow through.
+      - /usr/local/lib/SoapySDR:/usr/local/lib/SoapySDR:ro
+      - /usr/local/lib/libsdrplay_api.so:/usr/local/lib/libsdrplay_api.so:ro
+      - /usr/local/lib/libsdrplay_api.so.3:/usr/local/lib/libsdrplay_api.so.3:ro
+      - /usr/local/lib/libsdrplay_api.so.3.15:/usr/local/lib/libsdrplay_api.so.3.15:ro
     group_add:
       - audio
       - dialout
-    ports:
-      - "3000:3000"
     environment:
-      RUST_LOG: urc200_server=info,urc200_serial=info,tower_http=info
+      RUST_LOG: urc200_server=info,urc200_serial=info,radio_sdr=info,tower_http=info
       URC_PORT: /dev/ttyUSB0
       URC_BIND: 0.0.0.0:3000
+      # SDR capture config — override URC_SDR_DEVICE if you plug in something
+      # other than an SDRplay (e.g. `driver=rtlsdr`).
+      URC_SDR_DEVICE: driver=sdrplay
+      URC_SDR_CENTER: "251950000"
     stop_grace_period: 5s
     restart: unless-stopped
 
