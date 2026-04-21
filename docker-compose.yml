@@ -4,11 +4,14 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: urc200-server
-    # Host networking: lets the container reach the SDRplay API daemon at
-    # 127.0.0.1:50000 on the host (the daemon owns the RSPdx USB device and
-    # our in-container SoapySDR module connects to it over TCP). Also means
-    # :3000 is exposed directly; no `ports:` mapping needed with host net.
+    # Host networking: :3000 exposed directly (no `ports:` mapping needed).
     network_mode: host
+    # SDRplay API 3.x uses POSIX shared memory + semaphores in /dev/shm to
+    # talk between its client library and sdrplay_apiService. Containers get
+    # a private IPC namespace by default, so the in-container module would
+    # create its own shm that the host daemon never sees → "no match" on
+    # enumerate. Sharing the IPC namespace with the host fixes it.
+    ipc: host
     # USB-serial + USB-audio passthrough. When the PL2303 re-enumerates (USB
     # hiccup, container restart), Linux sometimes bumps the tty number. Pass
     # the first several through so the server can auto-pick whichever exists.
