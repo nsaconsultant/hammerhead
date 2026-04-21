@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#000000">
+<title>HammerHead Waterfall</title>
+<style>
+  :root {
+    --bg:       #000;
+    --panel:    #0b1014;
+    --fg:       #d4ae4a;
+    --accent:   #ffb300;
+    --muted:    #6c7177;
+    --line:     #222b33;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg);
+               font-family: ui-monospace, "SF Mono", Consolas, monospace;
+               height: 100%; overflow: hidden; }
+  #toolbar {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 10;
+    display: flex; align-items: center; gap: 12px;
+    padding: 6px 10px; background: rgba(11,16,20,0.85); backdrop-filter: blur(6px);
+    border-bottom: 1px solid var(--line);
+    font-size: 12px;
+  }
+  #toolbar .title { color: var(--accent); font-weight: 700; letter-spacing: 0.1em; }
+  #toolbar .kv { color: var(--muted); }
+  #toolbar .kv b { color: var(--fg); font-weight: 400; }
+  #toolbar input[type="number"], #toolbar select {
+    background: var(--panel); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 3px; padding: 3px 6px; font-family: inherit; font-size: 12px;
+    width: 120px;
+  }
+  #toolbar label { color: var(--muted); }
+  #toolbar button {
+    background: var(--panel); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 3px; padding: 3px 10px; font-family: inherit; font-size: 12px;
+    cursor: pointer;
+  }
+  #toolbar button:hover { border-color: var(--accent); }
+  #toolbar .dot { width: 8px; height: 8px; border-radius: 50%; background: #2a2f35; }
+  #toolbar .dot.ok { background: #5ad364; box-shadow: 0 0 5px #5ad364; }
+  #toolbar .dot.bad { background: #e54848; }
+  #toolbar .spacer { flex: 1; }
+
+  /* Two-layer canvas: live spectrum row up top, scrolling waterfall below. */
+  #wrap { position: absolute; top: 34px; left: 0; right: 0; bottom: 0; }
+  #spec { position: absolute; top: 0; left: 0; width: 100%; height: 120px;
+          background: #050505; border-bottom: 1px solid var(--line); }
+  #wf   { position: absolute; top: 120px; left: 0; right: 0; bottom: 0;
+          width: 100%; image-rendering: pixelated; }
+  #cursor { position: absolute; top: 0; bottom: 0; width: 1px;
+            background: rgba(255,179,0,0.55); pointer-events: none; display: none; }
+  #cursor-label { position: absolute; top: 0; background: rgba(0,0,0,0.7);
+                  color: var(--accent); font-size: 10px; padding: 2px 4px;
+                  border-radius: 2px; pointer-events: none; display: none;
+                  white-space: nowrap; }
+  #empty {
+    position: absolute; inset: 34px 0 0 0; display: flex;
+    align-items: center; justify-content: center; color: var(--muted);
+    font-size: 14px; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+  <div id="toolbar">
+    <span class="title">HAMMERHEAD WATERFALL</span>
+    <span class="dot" id="ws-dot"></span><span id="ws-state">disconnected</span>
+    <span class="kv">center <b id="t-center">—</b> MHz</span>
+    <span class="kv">span <b id="t-span">—</b> kHz</span>
+    <span class="kv">fps <b id="t-fps">—</b></span>
+    <span class="spacer"></span>
+    <label>tune
+      <input type="number" id="tune-input" step="0.001" placeholder="MHz">
+    </label>
+    <button id="tune-btn">Tune</button>
+    <label>gain
+      <select id="gain-sel">
+        <option value="auto">auto</option>
+        <option value="30">30 dB</option>
+        <option value="40">40 dB</option>
+        <option value="50">50 dB</option>
+        <option value="60">60 dB</option>
+      </select>
+    </label>
+  </div>
+
+  <div id="wrap">
+    <canvas id="spec"></canvas>
+    <canvas id="wf"></canvas>
+    <div id="cursor"></div>
+    <div id="cursor-label"></div>
+    <div id="empty">waiting for SDR frames…</div>
+  </div>
+
+<script>
+(() => {
+  const wsDot = document.getElementById("ws-dot");
+  const wsState = document.getElementById("ws-state");
+  const tCenter = document.getElementById("t-center");
+  const tSpan = document.getElementById("t-span");
+  const tFps = document.getElementById("t-fps");
+  const tuneInput = document.getElementById("tune-input");
+  const tuneBtn = document.getElementById("tune-btn");
+  const gainSel = document.getElementById("gain-sel");
+  const empty = document.getElementById("empty");
+  const spec = document.getElementById("spec");
+  const wf = document.getElementById("wf");
+  const cursor = document.getElementById("cursor");
+  const cursorLabel = document.getElementById("cursor-label");
+  const sctx = spec.getContext("2d");
+  const wctx = wf.getContext("2d");
+
+  // Offscreen scroll buffer so the waterfall can shift-and-draw cheaply.
+  const scratch = document.createElement("canvas");
+  const xctx = scratch.getContext("2d");
+
+  let ws = null;
+  let state = {
+    center_hz: 0,
+    sample_rate: 0,
+    fft_size: 0,
+    lastFrameAt: 0,
+    frameCount: 0,
+    fpsWindowAt: performance.now(),
+  };
+
+  // Iron palette — dark → red → yellow → white. Used by both the spectrum
+  // fill and the waterfall.
+  const palette = (() => {
+    const p = new Uint8ClampedArray(256 * 4);
+    for (let i = 0; i < 256; i++) {
+      const t = i / 255;
+      let r, g, b;
+      if (t < 0.1) {
+        const u = t / 0.1;
+        r = 5; g = 0 + 10*u; b = 10 + 40*u;
+      } else if (t < 0.4) {
+        const u = (t - 0.1) / 0.3;
+        r = 5 + 180*u; g = 10 + 30*u; b = 50 - 40*u;
+      } else if (t < 0.75) {
+        const u = (t - 0.4) / 0.35;
+        r = 185 + 70*u; g = 40 + 180*u; b = 10;
+      } else {
+        const u = (t - 0.75) / 0.25;
+        r = 255; g = 220 + 35*u; b = 10 + 240*u;
+      }
+      p[i*4+0] = r; p[i*4+1] = g; p[i*4+2] = b; p[i*4+3] = 255;
+    }
+    return p;
+  })();
+
+  function resize() {
+    const w = wf.clientWidth, hTop = spec.clientHeight, hBot = wf.clientHeight;
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    spec.width  = Math.round(w * dpr);
+    spec.height = Math.round(hTop * dpr);
+    wf.width    = Math.round(w * dpr);
+    wf.height   = Math.round(hBot * dpr);
+    scratch.width = wf.width;
+    scratch.height = wf.height;
+    sctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    wctx.setTransform(1, 0, 0, 1, 0, 0); // pixel space for blit
+    wctx.fillStyle = "#000"; wctx.fillRect(0, 0, wf.width, wf.height);
+  }
+  window.addEventListener("resize", resize);
+
+  function drawFrame(bins, centerHz, sampleRate) {
+    const n = bins.length;
+    if (n === 0) return;
+    const W = spec.clientWidth, H = spec.clientHeight;
+
+    // Spectrum row: live line.
+    sctx.fillStyle = "#050505"; sctx.fillRect(0, 0, W, H);
+    sctx.strokeStyle = "#151a1f"; sctx.lineWidth = 1;
+    for (let k = 1; k < 10; k++) {
+      const y = (H * k) / 10;
+      sctx.beginPath(); sctx.moveTo(0, y); sctx.lineTo(W, y); sctx.stroke();
+    }
+    sctx.strokeStyle = "#ffb300"; sctx.lineWidth = 1.5; sctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const x = (i / (n - 1)) * W;
+      const y = H - (bins[i] / 255) * H;
+      if (i === 0) sctx.moveTo(x, y); else sctx.lineTo(x, y);
+    }
+    sctx.stroke();
+
+    // Waterfall: scroll everything down by 1 row using the scratch canvas,
+    // then paint the new row at y=0. Drawing in device-pixel space avoids
+    // blurry resampling on HiDPI displays.
+    const Wpx = wf.width, Hpx = wf.height;
+    xctx.drawImage(wf, 0, 0);
+    wctx.drawImage(scratch, 0, 1, Wpx, Hpx - 1);
+
+    const img = wctx.createImageData(Wpx, 1);
+    for (let x = 0; x < Wpx; x++) {
+      const i = Math.floor((x / Wpx) * n);
+      const v = bins[i];
+      const pi = v * 4;
+      img.data[x*4+0] = palette[pi+0];
+      img.data[x*4+1] = palette[pi+1];
+      img.data[x*4+2] = palette[pi+2];
+      img.data[x*4+3] = 255;
+    }
+    wctx.putImageData(img, 0, 0);
+
+    // Header readouts.
+    tCenter.textContent = (centerHz / 1e6).toFixed(4);
+    tSpan.textContent = (sampleRate / 1e3).toFixed(0);
+  }
+
+  function updateFps() {
+    state.frameCount++;
+    const now = performance.now();
+    const dt = now - state.fpsWindowAt;
+    if (dt >= 1000) {
+      tFps.textContent = ((state.frameCount * 1000) / dt).toFixed(1);
+      state.frameCount = 0;
+      state.fpsWindowAt = now;
+    }
+  }
+
+  function connect() {
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    const url = `${proto}//${location.host}/api/ws/waterfall`;
+    ws = new WebSocket(url);
+    ws.binaryType = "arraybuffer";
+    wsDot.className = "dot"; wsState.textContent = "connecting";
+
+    ws.onopen = () => {
+      wsDot.className = "dot ok";
+      wsState.textContent = "live";
+    };
+    ws.onclose = () => {
+      wsDot.className = "dot bad";
+      wsState.textContent = "disconnected";
+      empty.style.display = "flex";
+      empty.textContent = "disconnected — retrying…";
+      setTimeout(connect, 2000);
+    };
+    ws.onerror = () => { /* let onclose retry */ };
+    ws.onmessage = (ev) => {
+      if (typeof ev.data === "string") {
+        try {
+          const m = JSON.parse(ev.data);
+          if (m.type === "sdr_header") {
+            state.center_hz = m.center_hz;
+            state.sample_rate = m.sample_rate;
+            state.fft_size = m.fft_size;
+            if (!tuneInput.value) {
+              tuneInput.value = (m.center_hz / 1e6).toFixed(4);
+            }
+          }
+        } catch {}
+        return;
+      }
+      // Binary: 16-byte header + bins.
+      const buf = ev.data;
+      if (buf.byteLength < 16) return;
+      const dv = new DataView(buf);
+      const centerHz = Number(dv.getBigUint64(0, true));
+      const sampleRate = dv.getUint32(8, true);
+      const nBins = dv.getUint32(12, true);
+      if (buf.byteLength < 16 + nBins) return;
+      const bins = new Uint8Array(buf, 16, nBins);
+      state.center_hz = centerHz;
+      state.sample_rate = sampleRate;
+      state.fft_size = nBins;
+      empty.style.display = "none";
+      drawFrame(bins, centerHz, sampleRate);
+      updateFps();
+    };
+  }
+
+  // Click-to-tune: map x within the waterfall/spec to a frequency, send it.
+  function setTuneFromX(x, rect) {
+    if (!state.sample_rate || !state.center_hz) return;
+    const frac = Math.min(1, Math.max(0, (x - rect.left) / rect.width));
+    const hz = state.center_hz - state.sample_rate / 2 + state.sample_rate * frac;
+    const rounded = Math.round(hz / 1000) * 1000;
+    sendRetune(rounded);
+    tuneInput.value = (rounded / 1e6).toFixed(4);
+  }
+
+  function sendRetune(hz) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ center_hz: hz }));
+    }
+  }
+
+  function sendGain() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const v = gainSel.value;
+    if (v === "auto") {
+      ws.send(JSON.stringify({ gain_mode: "auto" }));
+    } else {
+      ws.send(JSON.stringify({ gain_db: parseFloat(v) }));
+    }
+  }
+
+  [spec, wf].forEach(el => {
+    el.addEventListener("click", (e) => {
+      const rect = el.getBoundingClientRect();
+      setTuneFromX(e.clientX, rect);
+    });
+    el.addEventListener("mousemove", (e) => {
+      if (!state.sample_rate || !state.center_hz) { cursor.style.display = "none"; cursorLabel.style.display = "none"; return; }
+      const rect = el.getBoundingClientRect();
+      const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+      const hz = state.center_hz - state.sample_rate / 2 + state.sample_rate * frac;
+      cursor.style.display = "block";
+      cursor.style.left = `${e.clientX}px`;
+      cursorLabel.style.display = "block";
+      cursorLabel.style.left = `${e.clientX + 6}px`;
+      cursorLabel.textContent = `${(hz / 1e6).toFixed(4)} MHz`;
+    });
+    el.addEventListener("mouseleave", () => {
+      cursor.style.display = "none";
+      cursorLabel.style.display = "none";
+    });
+  });
+
+  tuneBtn.addEventListener("click", () => {
+    const mhz = parseFloat(tuneInput.value);
+    if (!isNaN(mhz) && mhz > 0) sendRetune(Math.round(mhz * 1e6));
+  });
+  tuneInput.addEventListener("keydown", (e) => { if (e.key === "Enter") tuneBtn.click(); });
+  gainSel.addEventListener("change", sendGain);
+
+  resize();
+  connect();
+})();
+</script>
+</body>
+</html>

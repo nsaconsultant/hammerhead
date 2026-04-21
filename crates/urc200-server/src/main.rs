@@ -20,6 +20,8 @@ mod db;
 mod dsp;
 mod ptt;
 mod scan;
+#[cfg(feature = "sdr")]
+mod sdr_routes;
 
 use anyhow::{Context, Result};
 use axum::{
@@ -60,6 +62,8 @@ struct AppState {
     audio: AudioCapture,
     audio_tx: AudioTx,
     scanner: ScannerHandle,
+    #[cfg(feature = "sdr")]
+    sdr: sdr_routes::SdrHandle,
 }
 
 #[tokio::main]
@@ -126,6 +130,21 @@ async fn main() -> Result<()> {
         poller.sender(),
     );
 
+    #[cfg(feature = "sdr")]
+    let sdr = {
+        let cfg = radio_sdr::SdrConfig {
+            device_args: std::env::var("URC_SDR_DEVICE")
+                .unwrap_or_else(|_| "driver=sdrplay".into()),
+            center_hz: std::env::var("URC_SDR_CENTER")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(251_950_000),
+            ..Default::default()
+        };
+        info!(device = %cfg.device_args, center = cfg.center_hz, "starting SDR capture");
+        sdr_routes::SdrHandle::spawn(cfg)
+    };
+
     let state = AppState {
         radio: radio_handle.radio.clone(),
         telemetry: poller.sender(),
@@ -134,9 +153,11 @@ async fn main() -> Result<()> {
         audio: audio.clone(),
         audio_tx: audio_tx.clone(),
         scanner: scanner_handle.clone(),
+        #[cfg(feature = "sdr")]
+        sdr,
     };
 
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/api/health", get(health))
         .route("/api/ws/telemetry", get(ws_telemetry))
         .route("/api/ws/control", get(ws_control))
@@ -146,8 +167,16 @@ async fn main() -> Result<()> {
         .route("/api/tx/ctcss", get(get_ctcss).post(set_ctcss))
         .route("/api/audio/filters/rx", get(get_rx_filters).post(set_rx_filters))
         .route("/api/audio/filters/tx", get(get_tx_filters).post(set_tx_filters))
+        .route("/api/features", get(features))
         .nest("/api/command", commands::router())
-        .nest("/api/channels", channels::router())
+        .nest("/api/channels", channels::router());
+
+    #[cfg(feature = "sdr")]
+    {
+        app = app.merge(sdr_routes::router());
+    }
+
+    let app = app
         .fallback_service(ServeDir::new(&static_dir))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -468,6 +497,17 @@ async fn health(State(_state): State<AppState>) -> Json<HealthPayload> {
     Json(HealthPayload {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
+    })
+}
+
+#[derive(Serialize)]
+struct FeaturesPayload {
+    sdr: bool,
+}
+
+async fn features(State(_state): State<AppState>) -> Json<FeaturesPayload> {
+    Json(FeaturesPayload {
+        sdr: cfg!(feature = "sdr"),
     })
 }
 

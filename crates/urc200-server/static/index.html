@@ -272,6 +272,12 @@
       <span class="dot" id="tel-dot"></span><span id="tel-state">telemetry</span>
       <span class="dot" id="ctl-dot"></span><span id="ctl-state">control</span>
       <span class="dot" id="aud-dot"></span><span id="aud-state">audio</span>
+      <a id="wf-link" href="/waterfall.html" target="hammerhead-waterfall"
+         rel="noopener"
+         style="display:none;color:var(--accent);text-decoration:none;border:1px solid var(--line);border-radius:4px;padding:3px 8px;font-size:11px;margin-left:6px"
+         title="Open the RSPdx waterfall in a new window (second monitor ready)">
+        Waterfall ↗
+      </a>
     </div>
   </header>
 
@@ -1446,6 +1452,15 @@ const scanHits = document.getElementById("scan-hits");
 
 let scanWs = null;
 let scanActive = false;
+
+// Reveal the Waterfall link only if the server was built with the `sdr`
+// feature — matches the optional-feature contract the Rust side enforces.
+fetch("/api/features").then(r => r.ok ? r.json() : null).then(f => {
+  if (f && f.sdr) {
+    const a = document.getElementById("wf-link");
+    if (a) a.style.display = "inline-block";
+  }
+}).catch(() => {});
 
 function populateScanGroups() {
   fetch("/api/channels/groups").then(r => r.json()).then(gs => {

@@ -1,10 +1,10 @@
-# urc200-head
+# HammerHead
 
-A browser-based remote-control head for the General Dynamics URC-200 (V2) LOS transceiver.
+A browser-based remote-control head for hardware radios — starting with the General Dynamics URC-200 (V2) LOS transceiver, built to grow to the rest of the H-250 handset family (PRC-117 up next).
 
-The radio lives in the rack with its RS-232 cable and the GD USB Audio Adapter (UAA) plugged into a small Linux box. From any device on your Tailscale network — laptop, phone, tablet — you open a web page and operate the radio as if you were standing in front of it. Tune, work presets, hear what it's hearing, key up (when you unlock PTT). The chunky rack radio becomes something you can drive from the couch.
+The radio lives in the rack with its RS-232 cable and the GD USB Audio Adapter (UAA) plugged into a small Linux box. From any device on your Tailscale network — laptop, phone, tablet — you open a web page and operate the radio as if you were standing in front of it. Tune, work presets, scan a channel library, hear what it's hearing, key up (when you unlock PTT). Optionally plug in an RSPdx / other SoapySDR device and a live waterfall opens in its own window for a second monitor.
 
-**Status:** end-to-end functional on one operator's real hardware. Protocol, serial dispatcher, audio I/O (both directions), PTT, CTCSS tone encoder, and channel library are all working. Ship-to-friends grade, not ship-to-the-world grade — see [Caveats](#caveats).
+**Status:** end-to-end functional on one operator's real hardware. Protocol, serial dispatcher, audio I/O (both directions), PTT, CTCSS tone encoder, channel library, library-scanner, manual tuning dial, server-side DSP, and — with the `sdr` feature enabled — the RSPdx-R2 waterfall are all working. Ship-to-friends grade, not ship-to-the-world grade — see [Caveats](#caveats).
 
 ---
 
@@ -12,17 +12,20 @@ The radio lives in the rack with its RS-232 cable and the GD USB Audio Adapter (
 
 - **Live view of the radio** — active channel, frequency pair, mode (AM/FM), RSSI meter, squelch open/closed, synth lock, overtemp, installed hardware options. Polled at 2-5 Hz, streamed to the browser over WebSocket.
 - **Change the channel** — click a P0-P9 preset, or type any RX + TX frequency in MHz. Simplex helper for one-click mirror. Band-aware validation; frequencies outside the URC-200's tuning range are rejected at the API edge.
+- **Manual tuning dial** — seven-segment-style LCD on the main card that tunes with scroll wheel, touch-drag, or keyboard arrows. Shift = ×10, Ctrl = ÷10. Same dial drives both preset and arbitrary tuning paths.
 - **Save a preset from the browser** — tune to what you want, click "Save to preset", pick a slot. The server orchestrates select-slot → re-apply-tune → Q (EEPROM write) automatically.
-- **Channel library** — groups of channels (Aviation, Marine VHF, SATCOM, whatever). SQLite-backed. CSV importer auto-detects three schemas:
+- **Channel library** — groups of channels (Aviation, Marine VHF, SATCOM, whatever). Collapsible per-group cards in the UI with delete. SQLite-backed. CSV importer auto-detects three schemas:
   - FLTSAT band-plan style (`Downlink`, `Uplink`, `Name`)
   - Chirp/ham-radio export (`Receive Frequency`, `Transmit Frequency`, `Operating Mode`, `Name`, `Step`, `CTCSS`)
   - Canonical (`name`, `rx_mhz`, `tx_mhz`, optional `mode`, `ctcss_hz`, `notes`)
   Channels outside the connected radio's supported bands still import, they're just flagged OOB in the UI and the Tune button is disabled.
+- **Library scanner** — pick a group, pick dwell + settle times, stop-on-hit or continuous. Subscribes to the poller's squelch telemetry rather than re-polling, so no extra load on the serial link. Never touches TX — only `SetRx` / `SetTx` / `ModTxRx`. Auto-skips OOB channels.
 - **Normal radio knobs** — lamp brightness, internal speaker, modulation AM/FM, TX power, squelch 0-255. Each maps to the corresponding Table 11 command.
 - **Hear the radio** — UAA capture streams mono S16LE at 48 kHz to your browser over WebSocket. Separate controls for your computer's speaker (browser mute/volume) and the radio's internal speaker (J0/J1 on the radio itself).
-- **Push-to-talk** — tap-and-hold on the on-screen pad or spacebar. Default-locked toggle prevents accidental keying. When armed, your browser mic is captured via AudioWorklet, streamed server-side, and written to the UAA playback PCM (radio's mic input). Heartbeat watchdog unkeys within 400 ms of any network or browser dropout.
+- **Push-to-talk** — tap-and-hold on the on-screen pad or spacebar. Default-locked toggle prevents accidental keying. When armed, your browser mic is captured via AudioWorklet, streamed server-side, and written to the UAA playback PCM (radio's mic input). Heartbeat watchdog unkeys within 400 ms of any network or browser dropout. RX playback is auto-muted on the keying client to suppress the UAA's internal sidetone feedback loop.
 - **CTCSS tone encoder in software** — the URC-200's base-band firmware doesn't encode CTCSS. Since the software owns the mic audio path, it mixes a selectable tone (67.0 - 254.1 Hz, all 50 EIA standards) into the outgoing mono stream. Tone amplitude is adjustable. Applied continuously for the duration of PTT, same as an inline hardware encoder.
-- **Server-side DSP** — biquad HPF / noise gate / LPF on both RX (cleans UAA output before shipping to browser) and TX (cleans mic audio before writing to UAA, *before* CTCSS mix so the sub-audible tone isn't high-passed away). All live-tunable.
+- **Server-side DSP** — biquad HPF / noise gate / LPF on both RX (cleans UAA output before shipping to browser) and TX (cleans mic audio before writing to UAA, *before* CTCSS mix so the sub-audible tone isn't high-passed away). All live-tunable from sliders in the UI.
+- **RSPdx / SoapySDR waterfall** (optional) — when the server is built with the `sdr` feature, a standalone `/waterfall.html` page opens a live spectrum + waterfall from any SoapySDR-compatible device. Click-to-tune sends a retune over the waterfall WS. Designed to pop out in its own window on a second monitor next to the main UI. Off by default so the default build needs no SDR toolchain.
 - **Single-operator lock** — multiple browsers can observe telemetry and hear RX audio; only one holds PTT at a time. First press wins; second client sees an "in use by …" state.
 
 ## Hardware
@@ -30,6 +33,7 @@ The radio lives in the rack with its RS-232 cable and the GD USB Audio Adapter (
 - **URC-200 (V2) LOS transceiver** — tested on a base-band unit (VHF 115-174 + UHF 225-400, no EBN-30 / EBN-400 / ECS-8 options). The protocol code handles all options; only the band-validation gate differs per radio.
 - **General Dynamics USB Audio Adapter (UAA)** — provides the RX/TX audio path. Appears as a USB audio class device (`hw:UAA2,0`, VID:PID `1a16:3155`). [Teardown.](https://www.appliedcarbon.org/gdusbaudio.html)
 - **USB-to-RS232 adapter** — any standard one works. Tested with a Prolific PL2303. RS-232 needs only three wires to the URC-200's J2 remote connector: pin `S` (radio TX out), pin `a` (radio RX in), pin `X` (ground). See §4.6.1 of the URC-200 manual for details.
+- **SDRplay RSPdx-R2** (optional) — drives the `/waterfall.html` page. Any SoapySDR-compatible device should work; set `URC_SDR_DEVICE` to the matching device-args string. See [Waterfall setup](#waterfall-setup-optional).
 - **Linux host** — DragonOS, Debian, Ubuntu all fine. Raspberry Pi 4/5 is the intended deployment target, though x86_64 is where it's been exercised.
 
 ## Protocol note for anyone else tackling the URC-200
@@ -49,8 +53,8 @@ Caught me for about thirty seconds on the first HIL query; pay it forward.
 Requires Docker + Docker Compose v2. On Linux.
 
 ```bash
-git clone https://github.com/YOUR-USER/urc200-head.git
-cd urc200-head
+git clone https://github.com/nsaconsultant/hammerhead.git
+cd hammerhead
 docker compose up -d
 ```
 
@@ -102,20 +106,27 @@ Then set `URC_PORT=/dev/urc200-serial` and the PL2303 can enumerate as anything 
 
 Workspace crates:
 
+- `radio-core` — the radio-agnostic trait set (`Radio`, `Mode`, `Capabilities`) that the multi-driver roadmap is being built against. Used by `urc200-serial` today; the PRC-117 driver will come next.
 - `urc200-proto` — zero-I/O protocol codec (Table 11 commands, Table 13 inquiries, ACK/NAK/HT parser, band-aware Freq type). Pure logic. Heavy unit tests.
-- `urc200-serial` — async `Transport` trait + `SerialTransport` (tokio-serial) + `MockTransport` + `Radio` dispatcher + `Poller`.
-- `urc200-server` — Axum HTTP/WebSocket host, SQLite channel library, audio I/O via ALSA, PTT arbiter, CTCSS mixer, DSP chain.
+- `urc200-serial` — async `Transport` trait + `SerialTransport` (tokio-serial) + `MockTransport` + `Radio` dispatcher + `Poller`, plus `impl radio_core::Radio for Urc200Radio`.
+- `urc200-server` — Axum HTTP/WebSocket host, SQLite channel library, audio I/O via ALSA, PTT arbiter, CTCSS mixer, DSP chain, library scanner, feature-gated SDR routes.
 - `radio-probe` — CLI diagnostic: send one command, hex-dump the response. Hard-refuses `B` / `*1` / `I` / `K`.
 - `latency-spike` — standalone tool for measuring the UAA's USB audio round-trip latency. Kept in the repo as a diagnostic.
+
+Crates that are intentionally **not** default workspace members (so `cargo build` stays green on hosts without their toolchains):
+
+- `radio-sdr` — SoapySDR capture + FFT waterfall feed. Pulled in by `urc200-server` only when built with `--features sdr`. See [Waterfall setup](#waterfall-setup-optional).
 
 ## API surface
 
 ```
 GET  /api/health
+GET  /api/features              { sdr: bool } — lets the UI show/hide feature-gated affordances
 GET  /api/ws/telemetry          typed JSON events (RSSI, squelch, mode, preset, general, synth_lock)
 GET  /api/ws/control            PTT protocol (hello, ptt_start, ptt_heartbeat, ptt_stop)
 GET  /api/ws/audio/rx           S16LE 48 kHz mono, binary frames + JSON header
 GET  /api/ws/audio/tx           mic upload, same format
+GET  /api/ws/scan               library-scanner events + start/stop/skip client msgs
 POST /api/command/preset/:n     0-9
 POST /api/command/lamp/:l       off|lo|med|hi
 POST /api/command/speaker/:s    on|off
@@ -137,9 +148,50 @@ DEL  /api/channels/groups/:name
 GET/POST /api/tx/ctcss          { freq_hz, amplitude? }
 GET/POST /api/audio/filters/rx  { hp_enabled, hp_fc, lp_enabled, lp_fc, gate_enabled, gate_db }
 GET/POST /api/audio/filters/tx  same fields
+
+# --- only present when the server was built with `--features sdr` ---
+GET  /waterfall.html            standalone second-monitor waterfall page
+GET  /api/ws/waterfall          binary spectrum feed. Each frame: 16-byte LE header
+                                (u64 center_hz, u32 sample_rate, u32 n_bins) + n_bins u8.
+                                Client may send {"center_hz": u64} or {"gain_db": f64}
+                                / {"gain_mode": "auto"} text messages to retune live.
+GET/POST /api/sdr/config        { center_hz, gain_db?, gain_mode? }
 ```
 
 Commands the server **deliberately does not expose**: `B` (transmit), `*1` (beacon), `I` (channel init), `K` (self-cal). Only the PTT arbiter reaches `B`, and only in response to an explicit browser gesture.
+
+## Waterfall setup (optional)
+
+The waterfall is an **opt-in Cargo feature**. The default build has no SDR toolchain requirements and will compile cleanly anywhere Rust + ALSA headers live. Only turn it on if you have the host libraries and actually want the panadapter.
+
+**Host prerequisites** (Debian/Ubuntu/DragonOS):
+
+```bash
+sudo apt install libsoapysdr-dev clang libclang-dev
+# plus the driver for your device — e.g. SDRplay API 3.15 from sdrplay.com for an RSPdx / RSPdx-R2
+```
+
+**Build with the feature on:**
+
+```bash
+cargo build --release -p urc200-server --features sdr
+```
+
+If the build fails with `fatal error: 'stdbool.h' file not found`, clang can't find its resource headers. Either install the `clang` binary (provides them) or point bindgen at gcc's:
+
+```bash
+BINDGEN_EXTRA_CLANG_ARGS='-I/usr/lib/gcc/x86_64-linux-gnu/13/include' \
+  cargo build --release -p urc200-server --features sdr
+```
+
+**Runtime config** via env:
+
+| var              | default            | notes                                                     |
+|------------------|--------------------|-----------------------------------------------------------|
+| `URC_SDR_DEVICE` | `driver=sdrplay`   | SoapySDR device-args string. e.g. `driver=rtlsdr`, `driver=sdrplay,serial=24051CD970` |
+| `URC_SDR_CENTER` | `251950000`        | Start-up center frequency in Hz. Retuned live from the UI. |
+
+**Using it:** with the server running, the main UI header shows a `Waterfall ↗` link (hidden when the feature isn't compiled in). Click it — it opens `/waterfall.html` as a named window target, so it lands on whichever monitor you last dragged it to. Click the spectrum or waterfall to retune; type a MHz value and press Enter to jump; pick a gain from the dropdown or leave it on auto AGC.
 
 ## Caveats
 

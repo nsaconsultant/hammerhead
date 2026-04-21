@@ -8,6 +8,11 @@ members = [
   "crates/urc200-serial",
   "crates/urc200-server",
 ]
+# radio-sdr is intentionally NOT a default workspace member: its build depends
+# on libsoapysdr-dev + clang/libclang-dev which aren't present on every host.
+# It's pulled in via path dependency from urc200-server only when the `sdr`
+# feature is enabled (`cargo build -p urc200-server --features sdr`).
+exclude = ["crates/radio-sdr"]
 
 [workspace.package]
 version = "0.1.0"

@@ -1,0 +1,29 @@
+[package]
+name = "radio-sdr"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.84"
+publish = false
+description = "SoapySDR capture + FFT waterfall feed for HammerHead."
+
+# Intentionally not a workspace member — the build depends on libsoapysdr-dev
+# and clang/libclang-dev, which aren't available everywhere. Pulled in via
+# path dependency from urc200-server only when its `sdr` feature is enabled.
+
+[lib]
+name = "radio_sdr"
+path = "src/lib.rs"
+
+[[bin]]
+name = "radio-sdr-probe"
+path = "src/bin/probe.rs"
+
+[dependencies]
+anyhow = "1"
+num-complex = "0.4"
+rustfft = "6"
+serde = { version = "1", features = ["derive"] }
+soapysdr = "0.4"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
