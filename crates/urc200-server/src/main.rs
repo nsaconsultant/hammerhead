@@ -19,6 +19,7 @@ mod control_ws;
 mod db;
 mod dsp;
 mod ptt;
+mod scan;
 
 use anyhow::{Context, Result};
 use axum::{
@@ -48,6 +49,7 @@ use urc200_serial::{
 use crate::audio::{AudioCapture, AudioTx};
 use crate::db::Db;
 use crate::ptt::PttHandle;
+use crate::scan::{ScanConfig, ScannerHandle};
 
 #[derive(Clone)]
 struct AppState {
@@ -57,6 +59,7 @@ struct AppState {
     db: Db,
     audio: AudioCapture,
     audio_tx: AudioTx,
+    scanner: ScannerHandle,
 }
 
 #[tokio::main]
@@ -116,6 +119,13 @@ async fn main() -> Result<()> {
     // Spawn the PTT arbiter. Holds ownership state; watchdogs heartbeat.
     let (ptt_handle, ptt_task) = PttHandle::spawn(radio_handle.radio.clone());
 
+    // Spawn the channel-library scanner.
+    let (scanner_handle, scanner_task) = ScannerHandle::spawn(
+        radio_handle.radio.clone(),
+        database.clone(),
+        poller.sender(),
+    );
+
     let state = AppState {
         radio: radio_handle.radio.clone(),
         telemetry: poller.sender(),
@@ -123,6 +133,7 @@ async fn main() -> Result<()> {
         db: database,
         audio: audio.clone(),
         audio_tx: audio_tx.clone(),
+        scanner: scanner_handle.clone(),
     };
 
     let app = Router::new()
@@ -131,6 +142,7 @@ async fn main() -> Result<()> {
         .route("/api/ws/control", get(ws_control))
         .route("/api/ws/audio/rx", get(ws_audio_rx))
         .route("/api/ws/audio/tx", get(ws_audio_tx))
+        .route("/api/ws/scan", get(ws_scan))
         .route("/api/tx/ctcss", get(get_ctcss).post(set_ctcss))
         .route("/api/audio/filters/rx", get(get_rx_filters).post(set_rx_filters))
         .route("/api/audio/filters/tx", get(get_tx_filters).post(set_tx_filters))
@@ -150,8 +162,12 @@ async fn main() -> Result<()> {
 
     info!("shutdown signal received; flushing E and closing");
 
-    // Shutdown invariant: arbiter first (it'll emit E if held), then explicit
-    // E for good measure, then poller, then the radio dispatcher itself.
+    // Stop the scanner first so it doesn't retune the radio mid-shutdown.
+    scanner_handle.shutdown().await;
+    let _ = scanner_task.await;
+
+    // PTT arbiter next (it'll emit E if held), then explicit E for good
+    // measure, then poller, then the radio dispatcher itself.
     ptt_handle.shutdown().await;
     let _ = ptt_task.await;
 
@@ -268,6 +284,69 @@ async fn get_tx_filters(State(s): State<AppState>) -> Json<dsp::FilterSnapshot> 
 async fn set_tx_filters(State(s): State<AppState>, Json(req): Json<FilterReq>) -> Json<dsp::FilterSnapshot> {
     apply_filter_req(&s.audio_tx.filters, req);
     Json(s.audio_tx.filters.snapshot())
+}
+
+// -------- Scanner WS --------
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ScanClientMsg {
+    Start(ScanConfig),
+    Stop,
+    Skip,
+}
+
+async fn ws_scan(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
+    ws.on_upgrade(move |socket| handle_scan(socket, state.scanner))
+        .into_response()
+}
+
+async fn handle_scan(mut socket: WebSocket, scanner: ScannerHandle) {
+    use tokio::sync::broadcast::error::RecvError;
+    let mut events = scanner.subscribe();
+    info!("scan ws client connected");
+    loop {
+        tokio::select! {
+            biased;
+            ev = events.recv() => match ev {
+                Ok(e) => {
+                    let json = serde_json::to_string(&e).unwrap_or_default();
+                    if socket.send(Message::Text(json)).await.is_err() { break; }
+                }
+                Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Closed) => break,
+            },
+            incoming = socket.recv() => match incoming {
+                None => break,
+                Some(Err(_)) => break,
+                Some(Ok(Message::Close(_))) => break,
+                Some(Ok(Message::Text(text))) => {
+                    match serde_json::from_str::<ScanClientMsg>(&text) {
+                        Ok(ScanClientMsg::Start(cfg)) => {
+                            match scanner.start(cfg).await {
+                                Ok(total) => {
+                                    let reply = serde_json::json!({ "type": "start_ack", "total": total });
+                                    let _ = socket.send(Message::Text(reply.to_string())).await;
+                                }
+                                Err(e) => {
+                                    let reply = serde_json::json!({ "type": "start_err", "message": e });
+                                    let _ = socket.send(Message::Text(reply.to_string())).await;
+                                }
+                            }
+                        }
+                        Ok(ScanClientMsg::Stop) => scanner.stop().await,
+                        Ok(ScanClientMsg::Skip) => scanner.skip().await,
+                        Err(e) => {
+                            let reply = serde_json::json!({ "type": "error", "message": format!("bad json: {e}") });
+                            let _ = socket.send(Message::Text(reply.to_string())).await;
+                        }
+                    }
+                }
+                Some(Ok(_)) => {}
+            }
+        }
+    }
+    info!("scan ws client disconnected");
 }
 
 /// Receive mic audio from the browser and forward to the UAA playback PCM.

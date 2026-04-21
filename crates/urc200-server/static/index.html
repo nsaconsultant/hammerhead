@@ -508,6 +508,36 @@
     </div>
   </div>
 
+  <!-- Scanner — walks a channel-library group, never TX -->
+  <div class="card" style="margin-bottom:12px">
+    <h2>Scanner <span class="muted" style="font-weight:normal; text-transform:none; letter-spacing:0; font-size:11px; margin-left:6px;">— channel-library group, squelch-driven, RX only</span></h2>
+    <div style="display:grid; grid-template-columns: 1fr 100px 100px auto auto auto; gap: 8px; align-items:end; margin-bottom: 8px;">
+      <div>
+        <label>Group</label>
+        <select id="scan-group"><option value="">(all groups)</option></select>
+      </div>
+      <div>
+        <label>Dwell (ms)</label>
+        <input type="number" id="scan-dwell" value="3000" min="500" max="60000" step="500">
+      </div>
+      <div>
+        <label>Settle (ms)</label>
+        <input type="number" id="scan-settle" value="200" min="50" max="2000" step="50">
+      </div>
+      <div>
+        <label style="white-space:nowrap"><input type="checkbox" id="scan-stop-on-hit"> stop on 1st hit</label>
+      </div>
+      <button id="scan-start" class="primary">Start</button>
+      <button id="scan-skip"  class="bare" disabled>Skip</button>
+    </div>
+    <div id="scan-status" class="muted" style="font-size:12px; min-height:18px">idle</div>
+    <div id="scan-current" style="margin-top:6px; font-family: inherit; font-size: 14px; color: var(--fg); min-height: 20px;"></div>
+    <div style="margin-top:8px">
+      <div class="muted" style="margin-bottom:4px; font-size:11px">recent hits</div>
+      <div id="scan-hits" style="max-height:120px; overflow:auto; font-size:11px; line-height:1.55;"></div>
+    </div>
+  </div>
+
   <!-- Row 5: Event log -->
   <div class="card">
     <h2>Recent events</h2>
@@ -1400,6 +1430,118 @@ async function apiPost(path, body) {
 
 loadGroups();
 loadChannels();
+
+// =============================================================
+// Scanner — channel-library group cycling (NOT the radio's P0-P9)
+// =============================================================
+const scanGroupSel = document.getElementById("scan-group");
+const scanDwell = document.getElementById("scan-dwell");
+const scanSettle = document.getElementById("scan-settle");
+const scanStopOnHit = document.getElementById("scan-stop-on-hit");
+const scanStartBtn = document.getElementById("scan-start");
+const scanSkipBtn = document.getElementById("scan-skip");
+const scanStatus = document.getElementById("scan-status");
+const scanCurrent = document.getElementById("scan-current");
+const scanHits = document.getElementById("scan-hits");
+
+let scanWs = null;
+let scanActive = false;
+
+function populateScanGroups() {
+  fetch("/api/channels/groups").then(r => r.json()).then(gs => {
+    const prev = scanGroupSel.value;
+    scanGroupSel.innerHTML = '<option value="">(all groups)</option>';
+    for (const g of gs) {
+      const opt = document.createElement("option");
+      opt.value = g.name;
+      opt.textContent = `${g.name} (${g.channel_count})`;
+      scanGroupSel.appendChild(opt);
+    }
+    scanGroupSel.value = prev;
+  }).catch(() => {});
+}
+populateScanGroups();
+
+function addHit(evt) {
+  const row = document.createElement("div");
+  row.className = "ev";
+  row.innerHTML = `<span class="t">${new Date().toLocaleTimeString()}</span> <span class="k">HIT</span> ${escape(evt.name)} · ${evt.rx_mhz.toFixed(4)}`;
+  scanHits.prepend(row);
+  while (scanHits.childNodes.length > 30) scanHits.removeChild(scanHits.lastChild);
+}
+
+function setScanActive(on) {
+  scanActive = on;
+  scanStartBtn.textContent = on ? "Stop" : "Start";
+  scanStartBtn.classList.toggle("danger", on);
+  scanStartBtn.classList.toggle("primary", !on);
+  scanSkipBtn.disabled = !on;
+  if (!on) scanCurrent.textContent = "";
+}
+
+function openScanWs() {
+  if (scanWs && scanWs.readyState <= 1) return;
+  const ws = new WebSocket(`${wsProto}://${location.host}/api/ws/scan`);
+  ws.onopen = () => { /* nothing; start on user gesture */ };
+  ws.onmessage = (e) => {
+    let ev; try { ev = JSON.parse(e.data); } catch { return; }
+    switch (ev.type) {
+      case "start_ack":
+        setScanActive(true);
+        scanStatus.textContent = `scanning ${ev.total} channel${ev.total === 1 ? "" : "s"}…`;
+        break;
+      case "start_err":
+        setScanActive(false);
+        scanStatus.textContent = `couldn't start: ${ev.message}`;
+        break;
+      case "started":
+        setScanActive(true);
+        scanStatus.textContent = `scanning ${ev.total} · group ${ev.group ?? "(all)"}`;
+        break;
+      case "tuned":
+        scanCurrent.innerHTML = `<b>${escape(ev.name)}</b> · ${ev.rx_mhz.toFixed(4)} MHz <span class="muted" style="font-size:11px">(${ev.idx + 1}/${ev.total})</span>`;
+        break;
+      case "hit":
+        addHit(ev);
+        scanStatus.textContent = `HIT on ${ev.name}`;
+        break;
+      case "stopped":
+        setScanActive(false);
+        scanStatus.textContent = `stopped (${ev.reason})`;
+        break;
+      case "error":
+        logEvent("scan err", ev);
+        break;
+    }
+  };
+  ws.onclose = () => { setScanActive(false); scanStatus.textContent = "scanner ws closed — retrying"; setTimeout(openScanWs, 1500); };
+  ws.onerror = () => {};
+  scanWs = ws;
+}
+openScanWs();
+
+scanStartBtn.onclick = () => {
+  if (!scanWs || scanWs.readyState !== 1) return;
+  if (scanActive) {
+    scanWs.send(JSON.stringify({ type: "stop" }));
+  } else {
+    const cfg = {
+      group: scanGroupSel.value || null,
+      dwell_ms: parseInt(scanDwell.value, 10) || 3000,
+      settle_ms: parseInt(scanSettle.value, 10) || 200,
+      stop_on_hit: scanStopOnHit.checked,
+    };
+    scanWs.send(JSON.stringify({ type: "start", ...cfg }));
+  }
+};
+scanSkipBtn.onclick = () => {
+  if (scanActive && scanWs?.readyState === 1) {
+    scanWs.send(JSON.stringify({ type: "skip" }));
+  }
+};
+// Refresh scanner group list whenever the library is reloaded.
+const origLoadGroups = loadGroups;
+loadGroups = async function() { await origLoadGroups(); populateScanGroups(); };
 </script>
 </body>
 </html>
