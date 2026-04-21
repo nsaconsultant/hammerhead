@@ -1,6 +1,6 @@
 # HammerHead
 
-A browser-based remote-control head for hardware radios — starting with the General Dynamics URC-200 (V2) LOS transceiver, built to grow to the rest of the H-250 handset family (PRC-117 up next).
+A browser-based remote-control head for hardware radios — starting with the General Dynamics URC-200 LOS transceiver (V1 *and* V2 share the same serial protocol and both work), built to grow to the rest of the H-250 handset family (PRC-117 up next).
 
 The radio lives in the rack with its RS-232 cable and the GD USB Audio Adapter (UAA) plugged into a small Linux box. From any device on your Tailscale network — laptop, phone, tablet — you open a web page and operate the radio as if you were standing in front of it. Tune, work presets, scan a channel library, hear what it's hearing, key up (when you unlock PTT). Optionally plug in an RSPdx / other SoapySDR device and a live waterfall opens in its own window for a second monitor.
 
@@ -30,7 +30,7 @@ The radio lives in the rack with its RS-232 cable and the GD USB Audio Adapter (
 
 ## Hardware
 
-- **URC-200 (V2) LOS transceiver** — tested on a base-band unit (VHF 115-174 + UHF 225-400, no EBN-30 / EBN-400 / ECS-8 options). The protocol code handles all options; only the band-validation gate differs per radio.
+- **URC-200 LOS transceiver** — works with V1 and V2; they share the same Table-11/12/13 serial protocol at 1200 bps. Primary test rig right now is a **V1** base-band unit (VHF 115-174 + UHF 225-400, no EBN-30 / EBN-400 / ECS-8 options); earlier dev happened on a V2 of the same variant. The protocol code handles all options; only the band-validation gate differs per radio.
 - **General Dynamics USB Audio Adapter (UAA)** — provides the RX/TX audio path. Appears as a USB audio class device (`hw:UAA2,0`, VID:PID `1a16:3155`). [Teardown.](https://www.appliedcarbon.org/gdusbaudio.html)
 - **USB-to-RS232 adapter** — any standard one works. Tested with a Prolific PL2303. RS-232 needs only three wires to the URC-200's J2 remote connector: pin `S` (radio TX out), pin `a` (radio RX in), pin `X` (ground). See §4.6.1 of the URC-200 manual for details.
 - **SDRplay RSPdx-R2** (optional) — drives the `/waterfall.html` page. Any SoapySDR-compatible device should work; set `URC_SDR_DEVICE` to the matching device-args string. See [Waterfall setup](#waterfall-setup-optional).
@@ -100,7 +100,7 @@ Then set `URC_PORT=/dev/urc200-serial` and the PL2303 can enumerate as anything 
                     └──────────┬───────────┘
                                │ RS-232 1200 bps 8-N-1 over PL2303
                     ┌──────────▼───────────┐     ┌────────────┐
-                    │    URC-200 (V2)      │◄────┤ UAA (USB)  │ audio in/out
+                    │   URC-200 (V1/V2)    │◄────┤ UAA (USB)  │ audio in/out
                     └──────────────────────┘     └────────────┘
 ```
 
@@ -239,7 +239,7 @@ The green ◆ on the spectrum and its label track where the URC-200 is actually 
 
 - **FCC / licensed operation only.** The URC-200 is a serious transmitter. Anything you do with it is your license on the line, same as any rig. This software is a front panel, not a guarantee of compliance.
 - **No in-app auth.** Access model is Tailscale-only — the Tailscale ACL is the auth. Do not put this on the open internet.
-- **Tested on one unit.** Base-band URC-200 (V2) with no EBN-30 / EBN-400 / ECS-8 options. Radios with those options should work (the protocol code is option-aware) but haven't been exercised.
+- **Tested on V1 and V2.** Both chassis revisions of the URC-200 speak the same serial protocol and are confirmed working. Primary rig is a base-band V1 (no EBN-30 / EBN-400 / ECS-8 options); earlier dev was on a V2 of the same variant. Radios with the optional boards should work (the protocol code is option-aware) but haven't been exercised.
 - **TX audio feedback suppression is client-side.** While a browser holds PTT, its own RX playback is muted to avoid the UAA's internal codec-sidetone feedback loop. Multi-operator scenarios (two browsers open, one keying) work because observers don't mute — but if your RX audio is coming out of the same speakers that feed a microphone somewhere else in the room, you'll still get feedback. Not a software problem.
 - **Docker bind-mount gotcha.** Never bind `:/dev/ttyUSB0:/dev/ttyUSB0` via `volumes:` — if the source path is missing at up time, Docker creates an empty *directory* on the host, which blocks udev from creating a device node when the adapter returns. Use `devices:` instead (present in this repo's `docker-compose.yml`).
 
