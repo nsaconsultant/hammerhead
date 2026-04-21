@@ -52,9 +52,9 @@
   #wrap { position: absolute; left: 0; right: 0; bottom: 0; }
   #spec  { position: absolute; top: 0;   left: 0; width: 100%; height: 120px;
            background: #050505; border-bottom: 1px solid var(--line); }
-  #ruler { position: absolute; top: 120px; left: 0; width: 100%; height: 22px;
+  #ruler { position: absolute; top: 120px; left: 0; width: 100%; height: 40px;
            background: #0a0f14; border-bottom: 1px solid var(--line); }
-  #wf    { position: absolute; top: 142px; left: 0; right: 0; bottom: 0;
+  #wf    { position: absolute; top: 160px; left: 0; right: 0; bottom: 0;
            width: 100%; image-rendering: pixelated; }
   #cursor { position: absolute; top: 0; bottom: 0; width: 1px;
             background: rgba(255,179,0,0.55); pointer-events: none; display: none; }
@@ -213,6 +213,72 @@
 
   // Pick a "nice" tick spacing in Hz given a visible span in Hz. Always one of
   // {1, 2, 5} × 10^k so labels land on readable values.
+  // US/ITU-R2 band plan — flattened to a list of non-overlapping spans for
+  // ruler labeling. Each entry is {lo, hi, name, color}. Names and colors
+  // are tuned for at-a-glance recognition, not regulatory completeness.
+  //
+  // Source mix: FCC allocation table + ARRL band plan + common mil/fed
+  // assignments (UHF SATCOM, MILAIR, etc.). When a regulatory band and a
+  // practical-usage label conflict we prefer the usage label (e.g.
+  // "UHF SATCOM DL" inside the broader 225-400 MHz mil UHF allocation).
+  const BANDS = [
+    // HF ham (the big contest bands only — the rest is noise on a waterfall)
+    { lo:   1_800_000, hi:   2_000_000, name: "160m Ham",     color: "#2d5" },
+    { lo:   3_500_000, hi:   4_000_000, name: "80m Ham",      color: "#2d5" },
+    { lo:   5_330_500, hi:   5_406_400, name: "60m Ham",      color: "#2d5" },
+    { lo:   7_000_000, hi:   7_300_000, name: "40m Ham",      color: "#2d5" },
+    { lo:  10_100_000, hi:  10_150_000, name: "30m Ham",      color: "#2d5" },
+    { lo:  14_000_000, hi:  14_350_000, name: "20m Ham",      color: "#2d5" },
+    { lo:  18_068_000, hi:  18_168_000, name: "17m Ham",      color: "#2d5" },
+    { lo:  21_000_000, hi:  21_450_000, name: "15m Ham",      color: "#2d5" },
+    { lo:  24_890_000, hi:  24_990_000, name: "12m Ham",      color: "#2d5" },
+    { lo:  26_965_000, hi:  27_405_000, name: "CB",           color: "#a64" },
+    { lo:  28_000_000, hi:  29_700_000, name: "10m Ham",      color: "#2d5" },
+    // Low VHF
+    { lo:  30_000_000, hi:  50_000_000, name: "Low VHF Fed/PS", color: "#76a" },
+    { lo:  50_000_000, hi:  54_000_000, name: "6m Ham",      color: "#2d5" },
+    { lo:  54_000_000, hi:  72_000_000, name: "VHF TV 2-4",  color: "#567" },
+    { lo:  72_000_000, hi:  76_000_000, name: "Fed/R-C",     color: "#76a" },
+    { lo:  76_000_000, hi:  88_000_000, name: "VHF TV 5-6",  color: "#567" },
+    { lo:  88_000_000, hi: 108_000_000, name: "FM Broadcast",color: "#a85" },
+    // Aviation / VHF-air
+    { lo: 108_000_000, hi: 117_975_000, name: "Aero Nav (VOR/ILS)", color: "#58a" },
+    { lo: 117_975_000, hi: 137_000_000, name: "Civil Air (AM)",     color: "#39c" },
+    { lo: 137_000_000, hi: 138_000_000, name: "Wx/Met Sat",         color: "#58a" },
+    { lo: 138_000_000, hi: 144_000_000, name: "Fed/Mil VHF",        color: "#a37" },
+    { lo: 144_000_000, hi: 148_000_000, name: "2m Ham",             color: "#2d5" },
+    { lo: 148_000_000, hi: 150_800_000, name: "Fed/Mil VHF",        color: "#a37" },
+    { lo: 150_800_000, hi: 156_000_000, name: "VHF LMR/PS",         color: "#76a" },
+    { lo: 156_000_000, hi: 162_025_000, name: "Marine VHF",         color: "#27a" },
+    { lo: 162_400_000, hi: 162_550_000, name: "NOAA Weather",       color: "#48c" },
+    { lo: 162_025_000, hi: 174_000_000, name: "Fed/LMR VHF",        color: "#76a" },
+    { lo: 174_000_000, hi: 216_000_000, name: "VHF TV 7-13",        color: "#567" },
+    { lo: 216_000_000, hi: 225_000_000, name: "Fed/AMTS",           color: "#567" },
+    // UHF military / SATCOM
+    { lo: 225_000_000, hi: 240_000_000, name: "UHF Mil AM",         color: "#a37" },
+    { lo: 240_000_000, hi: 270_000_000, name: "UHF SATCOM DL",      color: "#c39" },
+    { lo: 270_000_000, hi: 292_000_000, name: "UHF Mil",            color: "#a37" },
+    { lo: 292_000_000, hi: 318_000_000, name: "UHF SATCOM UL",      color: "#c39" },
+    { lo: 318_000_000, hi: 328_600_000, name: "UHF Mil",            color: "#a37" },
+    { lo: 328_600_000, hi: 335_400_000, name: "Aero Nav (ILS GP)",  color: "#58a" },
+    { lo: 335_400_000, hi: 399_900_000, name: "UHF Mil",            color: "#a37" },
+    { lo: 399_900_000, hi: 406_000_000, name: "MSS / Std-Freq",     color: "#48c" },
+    { lo: 406_000_000, hi: 420_000_000, name: "Fed UHF",            color: "#76a" },
+    { lo: 420_000_000, hi: 450_000_000, name: "70cm Ham",           color: "#2d5" },
+    { lo: 450_000_000, hi: 470_000_000, name: "UHF LMR/PS",         color: "#76a" },
+    { lo: 470_000_000, hi: 608_000_000, name: "UHF TV",             color: "#567" },
+    { lo: 608_000_000, hi: 614_000_000, name: "Radio Astronomy",    color: "#345" },
+    { lo: 614_000_000, hi: 698_000_000, name: "UHF TV",             color: "#567" },
+    { lo: 698_000_000, hi: 806_000_000, name: "700 MHz LTE/PS",     color: "#76a" },
+    { lo: 806_000_000, hi: 824_000_000, name: "800 MHz PS/Trunked", color: "#76a" },
+    { lo: 824_000_000, hi: 894_000_000, name: "Cellular",           color: "#93a" },
+    { lo: 902_000_000, hi: 928_000_000, name: "33cm Ham / ISM",     color: "#2d5" },
+    { lo: 960_000_000, hi:1_215_000_000, name: "Aero Radionav",     color: "#58a" },
+    { lo:1_240_000_000, hi:1_300_000_000, name: "23cm Ham",         color: "#2d5" },
+    { lo:1_525_000_000, hi:1_660_500_000, name: "MSS L-band",       color: "#48c" },
+    { lo:2_400_000_000, hi:2_483_500_000, name: "13cm Ham / WiFi",  color: "#2d5" },
+  ];
+
   function niceStep(spanHz, approxTicks) {
     const raw = spanHz / approxTicks;
     const pow10 = Math.pow(10, Math.floor(Math.log10(raw)));
@@ -232,6 +298,11 @@
     if (Math.abs(mhz) >= 10) return mhz.toFixed(4);
     return mhz.toFixed(5);
   }
+
+  // Ruler layout: total height 40 px, split into a ticks zone on top and a
+  // band-strip zone on the bottom.
+  const RULER_TICKS_H = 22;
+  const RULER_BANDS_H = 18;
 
   function drawRuler() {
     const W = ruler.clientWidth, H = ruler.clientHeight;
@@ -264,6 +335,42 @@
     for (let hz = mFirst; hz <= v.high; hz += minor) {
       const x = ((hz - v.low) / v.span) * W;
       rctx.beginPath(); rctx.moveTo(x, 0); rctx.lineTo(x, 3); rctx.stroke();
+    }
+
+    // Band strip (FCC/ITU-R2 allocation labels). Each band that intersects
+    // the visible range is drawn as a translucent colored span across the
+    // strip, with the name inlaid when there's enough pixel width for it.
+    const stripY = RULER_TICKS_H;
+    const stripH = RULER_BANDS_H;
+    rctx.fillStyle = "#05080b";
+    rctx.fillRect(0, stripY, W, stripH);
+
+    for (const b of BANDS) {
+      if (b.hi <= v.low || b.lo >= v.high) continue;
+      const x0 = Math.max(0, ((b.lo - v.low) / v.span) * W);
+      const x1 = Math.min(W, ((b.hi - v.low) / v.span) * W);
+      const w = x1 - x0;
+      if (w < 1) continue;
+
+      // Translucent fill for readability — ~28% alpha on the band color so
+      // the tick grid can show through and labels stay legible.
+      rctx.fillStyle = b.color + "48";
+      rctx.fillRect(x0, stripY, w, stripH);
+
+      // Thin solid color edge top + side separators.
+      rctx.fillStyle = b.color;
+      rctx.fillRect(x0, stripY, w, 2);
+
+      // Inlay the name if the span is wide enough. Budget ~6 px per char
+      // plus 8 px padding; otherwise leave the strip unlabeled.
+      const budget = Math.max(0, w - 8);
+      if (budget >= b.name.length * 5.6) {
+        rctx.fillStyle = "#fff";
+        rctx.font = "10px ui-monospace, Consolas, monospace";
+        rctx.textAlign = "center";
+        rctx.textBaseline = "middle";
+        rctx.fillText(b.name, x0 + w / 2, stripY + 2 + (stripH - 2) / 2);
+      }
     }
 
     // SDR center crosshair — dim, since it's the window, not the receiver.
@@ -490,7 +597,10 @@
       cursor.style.left = `${e.clientX}px`;
       cursorLabel.style.display = "block";
       cursorLabel.style.left = `${e.clientX + 6}px`;
-      cursorLabel.textContent = `${formatHz(hz)} MHz`;
+      const band = BANDS.find(b => hz >= b.lo && hz < b.hi);
+      cursorLabel.textContent = band
+        ? `${formatHz(hz)} MHz · ${band.name}`
+        : `${formatHz(hz)} MHz`;
     });
     el.addEventListener("mouseleave", () => {
       cursor.style.display = "none";
