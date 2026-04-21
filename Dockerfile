@@ -49,7 +49,8 @@ ENV URC_STATIC=/opt/urc200/static \
     URC_BIND=0.0.0.0:3000 \
     URC_PORT=/dev/ttyUSB0 \
     RUST_LOG=urc200_server=info,urc200_serial=info,radio_sdr=info \
-    SOAPY_SDR_PLUGIN_PATH=/usr/local/lib/SoapySDR/modules0.8
+    SOAPY_SDR_PLUGIN_PATH=/usr/local/lib/SoapySDR/modules0.8 \
+    LD_LIBRARY_PATH=/usr/local/lib:/usr/lib/x86_64-linux-gnu
 
 EXPOSE 3000
 ENTRYPOINT ["/usr/local/bin/urc200-server"]
