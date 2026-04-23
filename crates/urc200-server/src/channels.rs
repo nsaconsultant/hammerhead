@@ -282,6 +282,10 @@ struct ParsedCsv {
 /// Auto-detect the schema by header names. Known profiles:
 ///   - "satcom":    `Downlink`, `Uplink`, `Name`              (FLTSAT-style)
 ///   - "ham_full":  `Receive Frequency`, `Transmit Frequency`, `Name`, optional `Operating Mode`, `Step`
+///   - "chirp":     `Frequency`, `Duplex`, `Offset`, `Name`, with TX computed
+///                  as `Frequency ± Offset` based on Duplex `+`/`-`/empty. Uses
+///                  `rToneFreq` for CTCSS (Chirp's `Tone` column is the tone
+///                  MODE — "Tone", "TSQL", "off" — not a frequency).
 ///   - "canonical": `name`, `rx_mhz`, `tx_mhz`, `mode`(opt), `step_khz`(opt), `notes`(opt)
 fn parse_csv(body: &str, group: &str) -> Result<ParsedCsv, String> {
     let mut rdr = csv::ReaderBuilder::new()
@@ -291,10 +295,11 @@ fn parse_csv(body: &str, group: &str) -> Result<ParsedCsv, String> {
         .from_reader(body.as_bytes());
 
     let headers = rdr.headers().map_err(|e| e.to_string())?.clone();
+    // Strip UTF-8 BOM from the first header if present (Chirp + Excel love it).
     let hmap: HashMap<String, usize> = headers
         .iter()
         .enumerate()
-        .map(|(i, h)| (h.to_lowercase(), i))
+        .map(|(i, h)| (h.trim_start_matches('\u{feff}').to_lowercase(), i))
         .collect();
 
     let has = |keys: &[&str]| -> Option<usize> {
@@ -306,11 +311,13 @@ fn parse_csv(body: &str, group: &str) -> Result<ParsedCsv, String> {
         None
     };
 
-    let (profile, rx_i, tx_i, name_i, mode_i, step_i, notes_i, ctcss_i): (
+    let (profile, rx_i, tx_i, name_i, mode_i, step_i, notes_i, ctcss_i, duplex_i, offset_i): (
         &'static str,
         usize,
         usize,
         usize,
+        Option<usize>,
+        Option<usize>,
         Option<usize>,
         Option<usize>,
         Option<usize>,
@@ -330,6 +337,8 @@ fn parse_csv(body: &str, group: &str) -> Result<ParsedCsv, String> {
         step_i = has(&["Bandwidth KHz", "Step"]);
         notes_i = has(&["Comment", "Notes"]);
         ctcss_i = has(&["CTCSS", "Tone"]);
+        duplex_i = None;
+        offset_i = None;
     } else if let (Some(rx), Some(tx), Some(nm)) = (
         has(&["Receive Frequency", "RX Frequency"]),
         has(&["Transmit Frequency", "TX Frequency"]),
@@ -343,6 +352,27 @@ fn parse_csv(body: &str, group: &str) -> Result<ParsedCsv, String> {
         step_i = has(&["Step"]);
         notes_i = has(&["Comment", "Notes"]);
         ctcss_i = has(&["CTCSS", "Tone"]);
+        duplex_i = None;
+        offset_i = None;
+    } else if let (Some(freq), Some(dup), Some(off), Some(nm)) = (
+        has(&["Frequency"]),
+        has(&["Duplex"]),
+        has(&["Offset"]),
+        has(&["Name"]),
+    ) {
+        // Chirp compact export: RX = Frequency, TX = RX ± Offset per Duplex.
+        profile = "chirp";
+        rx_i = freq;
+        tx_i = freq; // placeholder; real tx is computed from duplex + offset
+        name_i = nm;
+        mode_i = has(&["Mode"]);
+        step_i = has(&["TStep", "Step"]);
+        notes_i = has(&["Comment", "Notes"]);
+        // rToneFreq = repeater access tone (TX CTCSS). Prefer it over cToneFreq
+        // (RX squelch tone) for an encoder like ours.
+        ctcss_i = has(&["rToneFreq", "CTCSS"]);
+        duplex_i = Some(dup);
+        offset_i = Some(off);
     } else if let (Some(rx), Some(tx), Some(nm)) = (
         has(&["rx_mhz", "rx"]),
         has(&["tx_mhz", "tx"]),
@@ -356,11 +386,13 @@ fn parse_csv(body: &str, group: &str) -> Result<ParsedCsv, String> {
         step_i = has(&["step_khz", "step"]);
         notes_i = has(&["notes", "comment"]);
         ctcss_i = has(&["ctcss_hz", "ctcss", "tone"]);
+        duplex_i = None;
+        offset_i = None;
     } else {
         return Err(format!(
             "could not auto-detect CSV profile; headers were: {:?}. \
              Supported: satcom (Downlink/Uplink/Name), ham_full (Receive Frequency/Transmit Frequency/Name), \
-             canonical (name/rx_mhz/tx_mhz)",
+             chirp (Frequency/Duplex/Offset/Name), canonical (name/rx_mhz/tx_mhz)",
             headers.iter().collect::<Vec<_>>()
         ));
     };
@@ -390,11 +422,25 @@ fn parse_csv(body: &str, group: &str) -> Result<ParsedCsv, String> {
                 continue;
             }
         };
-        let tx_hz = match parse_mhz_to_hz(tx_raw) {
-            Some(v) => v,
-            None => {
-                skipped.push(format!("{name}: tx {tx_raw:?} not a MHz value"));
-                continue;
+        // Chirp: derive TX from RX + signed offset instead of using tx_raw.
+        let tx_hz = if let (Some(di), Some(oi)) = (duplex_i, offset_i) {
+            let dup = rec.get(di).unwrap_or("").trim();
+            let off_mhz: f64 = rec.get(oi).unwrap_or("").trim().parse().unwrap_or(0.0);
+            let off_hz = (off_mhz * 1_000_000.0).round() as i64;
+            match dup {
+                "+" => rx_hz.saturating_add(off_hz as u32),
+                "-" => rx_hz.saturating_sub(off_hz as u32),
+                // "", "off", "split" → treat as simplex; split is rare in ham
+                // and can't be expressed with a single offset anyway.
+                _ => rx_hz,
+            }
+        } else {
+            match parse_mhz_to_hz(tx_raw) {
+                Some(v) => v,
+                None => {
+                    skipped.push(format!("{name}: tx {tx_raw:?} not a MHz value"));
+                    continue;
+                }
             }
         };
         // Don't skip out-of-band rows — the library is a station-wide reference,
