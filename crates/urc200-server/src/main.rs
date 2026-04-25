@@ -158,6 +158,31 @@ async fn main() -> Result<()> {
     // Spawn the PTT arbiter. Holds ownership state; watchdogs heartbeat.
     let (ptt_handle, ptt_task) = PttHandle::spawn(radio_handle.radio.clone());
 
+    // Pause/resume the inquiry poller around any PTT-held window. We've
+    // confirmed on real radios (V1 and V2) that bytes the dispatcher emits
+    // during TX get RF-corrupted on the unshielded RS-232 cable, and the
+    // corruption occasionally lands as a command sequence the firmware reads
+    // as "cancel presets" — wiping the radio's tuned channel back to the
+    // documented 225 MHz / AM / low-power factory default (manual §4.4.2).
+    // Going silent on the wire while the operator is keyed avoids the
+    // entire failure mode. Handset-PTT path was always silent (we never
+    // know to send anything) which is why it didn't trigger this.
+    {
+        let pause = poller.pause_handle();
+        let mut ptt_events = ptt_handle.subscribe();
+        tokio::spawn(async move {
+            use tokio::sync::broadcast::error::RecvError;
+            loop {
+                match ptt_events.recv().await {
+                    Ok(crate::ptt::PttEvent::Acquired(_)) => pause.pause().await,
+                    Ok(crate::ptt::PttEvent::Released { .. }) => pause.resume().await,
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+
     // Spawn the channel-library scanner.
     let (scanner_handle, scanner_task) = ScannerHandle::spawn(
         radio_handle.radio.clone(),

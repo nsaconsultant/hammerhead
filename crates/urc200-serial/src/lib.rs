@@ -15,7 +15,7 @@ mod transport;
 
 pub use error::{RadioError, TransportError};
 pub use mock::MockTransport;
-pub use poller::{BackoffMode, PollErrorKind, Poller, TelemetryUpdate};
+pub use poller::{BackoffMode, PollErrorKind, Poller, PollerPause, TelemetryUpdate};
 pub use radio::{Radio, RadioHandle, DEFAULT_TIMEOUT};
 pub use radio_impl::URC200_CAPS;
 pub use serial::{SerialConfig, SerialTransport};

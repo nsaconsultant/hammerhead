@@ -79,6 +79,29 @@ enum Control {
     SetBackoff(BackoffMode),
 }
 
+/// Clone-friendly pause/resume control extracted from a [`Poller`]. Hand this
+/// to anyone (e.g. the PTT arbiter) who needs to silence the inquiry stream
+/// without owning the full Poller handle.
+#[derive(Clone)]
+pub struct PollerPause {
+    control: mpsc::Sender<Control>,
+}
+
+impl PollerPause {
+    pub async fn pause(&self) {
+        let _ = self
+            .control
+            .send(Control::SetBackoff(BackoffMode::Paused))
+            .await;
+    }
+    pub async fn resume(&self) {
+        let _ = self
+            .control
+            .send(Control::SetBackoff(BackoffMode::Normal))
+            .await;
+    }
+}
+
 /// Handle to the poller task. Clone-free — only the spawner owns it. Drop to
 /// shut down; call [`shutdown`](Self::shutdown) to await clean exit.
 pub struct Poller {
@@ -121,6 +144,18 @@ impl Poller {
     /// Switch between normal, idle, and paused polling.
     pub async fn set_backoff(&self, mode: BackoffMode) {
         let _ = self.control.send(Control::SetBackoff(mode)).await;
+    }
+
+    /// Cheap clone-able handle that can pause/resume the poller from anywhere
+    /// in the codebase. Used by the PTT arbiter so the inquiry stream goes
+    /// silent while the operator is keyed: empirical evidence on real radios
+    /// shows that bytes the dispatcher emits during TX get RF-corrupted on the
+    /// unshielded RS-232 cable and occasionally land as protocol commands the
+    /// firmware reads as "cancel presets", wiping the radio's tuned channel.
+    pub fn pause_handle(&self) -> PollerPause {
+        PollerPause {
+            control: self.control.clone(),
+        }
     }
 
     /// Drop the control handle and wait for the task to finish. The poller
