@@ -148,7 +148,26 @@ async fn dispatcher_loop(
         // is a self-contained framing unit.
         parser.reset();
 
+        // Drop any stale bytes the OS may have buffered (a late response from a
+        // previously timed-out command, framing junk from a radio power cycle,
+        // etc.) before issuing the new command. Without this, the next read
+        // misattributes the stale bytes as the response to the new command and
+        // the whole pipeline runs off-by-one until the process restarts.
+        if let Err(e) = transport.drain_input().await {
+            tracing::warn!(error = ?e, "drain_input before write failed");
+        }
+
         tracing::debug!(bytes = %display_bytes(&req.bytes), "-> wire");
+        // Bug-B canary: `I` = ChannelInit, the firmware command that wipes
+        // presets to factory defaults. No code path in this workspace ever
+        // sends it, so seeing it on the wire means we have a bug — log
+        // loudly with the exact bytes so the source can be tracked down.
+        if req.bytes.contains(&b'I') {
+            tracing::warn!(
+                bytes = %display_bytes(&req.bytes),
+                "outgoing command contains 0x49 ('I' = ChannelInit) — this will reset radio to defaults"
+            );
+        }
         if let Err(e) = transport.write_all(&req.bytes).await {
             let _ = req.reply.send(Err(RadioError::Transport(e)));
             continue;

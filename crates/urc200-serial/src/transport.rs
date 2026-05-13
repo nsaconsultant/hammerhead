@@ -19,4 +19,12 @@ pub trait Transport: Send {
     /// which is >= 1 on success. A return of `0` means the peer closed (or, for
     /// the mock, the script is exhausted and a `Closed` error is preferable).
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError>;
+
+    /// Discard anything currently buffered in the OS RX queue. The dispatcher
+    /// calls this immediately before each write so a late or stray response
+    /// from a previous command cannot be mis-attributed to the next one.
+    /// Default no-op for transports without an OS-level buffer (e.g. mocks).
+    async fn drain_input(&mut self) -> Result<(), TransportError> {
+        Ok(())
+    }
 }

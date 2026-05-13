@@ -2,7 +2,10 @@ use crate::{Transport, TransportError};
 use async_trait::async_trait;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio_serial::{DataBits, FlowControl, Parity, SerialPortBuilderExt, SerialStream, StopBits};
+use tokio_serial::{
+    ClearBuffer, DataBits, FlowControl, Parity, SerialPort, SerialPortBuilderExt, SerialStream,
+    StopBits,
+};
 
 /// Serial-port settings. Defaults match URC-200 §4.6.2: 1200 bps, 8-N-1, no flow control.
 #[derive(Debug, Clone)]
@@ -38,13 +41,23 @@ pub struct SerialTransport {
 impl SerialTransport {
     /// Open a serial port configured for the URC-200.
     pub fn open(cfg: &SerialConfig) -> Result<Self, TransportError> {
-        let stream = tokio_serial::new(&cfg.path, cfg.baud)
+        let mut stream = tokio_serial::new(&cfg.path, cfg.baud)
             .data_bits(cfg.data_bits)
             .stop_bits(cfg.stop_bits)
             .parity(cfg.parity)
             .flow_control(cfg.flow_control)
             .timeout(cfg.open_timeout)
             .open_native_async()?;
+        // Discard any bytes left in the OS buffers from a prior session.
+        // Stale RX bytes were the proximate cause of an observed dispatcher
+        // off-by-one wedge — one late response from before the prior crash
+        // would land in the kernel buffer and get attributed to the next
+        // command after restart, then every subsequent response too. The
+        // companion `drain_input` call in the dispatcher loop handles the
+        // steady-state case; this open-time clear handles the cold start.
+        if let Err(e) = stream.clear(ClearBuffer::All) {
+            tracing::warn!(error = ?e, "clear ClearBuffer::All on open failed; continuing");
+        }
         Ok(Self { stream })
     }
 }
@@ -60,5 +73,12 @@ impl Transport for SerialTransport {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
         let n = self.stream.read(buf).await?;
         Ok(n)
+    }
+
+    async fn drain_input(&mut self) -> Result<(), TransportError> {
+        // `clear` is a synchronous ioctl on the underlying fd; safe to call
+        // from an async context. Returns serialport::Error → tokio_serial::Error.
+        self.stream.clear(ClearBuffer::Input)?;
+        Ok(())
     }
 }
