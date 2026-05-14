@@ -11,9 +11,10 @@ The radio lives in the rack with its RS-232 cable and the GD USB Audio Adapter (
 ## What it does
 
 - **Live view of the radio** — active channel, frequency pair, mode (AM/FM), RSSI meter, squelch open/closed, synth lock, overtemp, installed hardware options. Polled at 2-5 Hz, streamed to the browser over WebSocket.
-- **Change the channel** — click a P0-P9 preset, or type any RX + TX frequency in MHz. Simplex helper for one-click mirror. Band-aware validation; frequencies outside the URC-200's tuning range are rejected at the API edge.
+- **Change the channel** — click an emergency preset, or type any RX + TX frequency in MHz. Simplex helper for one-click mirror. Band-aware validation; frequencies outside the URC-200's tuning range are rejected at the API edge. The LCD shows the channel's name above the freq when the tune came from the library or the scanner stepped to it.
 - **Manual tuning dial** — seven-segment-style LCD on the main card that tunes with scroll wheel, touch-drag, or keyboard arrows. Shift = ×10, Ctrl = ÷10. Same dial drives both preset and arbitrary tuning paths.
-- **Save a preset from the browser** — tune to what you want, click "Save to preset", pick a slot. The server orchestrates select-slot → re-apply-tune → Q (EEPROM write) automatically.
+- **Scratch-slot tune funnel** — every software-initiated tune routes through a dedicated "scratch" preset slot (default `P9`, configurable via `URC_SCRATCH_PRESET`) so the radio's TX-time preset-recall behavior can't overwrite your tune. The other nine slots are reserved as a stable emergency-channel library — see [Preset model](#preset-model-scratch-slot--emergency-channels).
+- **Save a preset from the browser** — tune to what you want, click "Save to preset…", pick an emergency slot. The server uses `/api/command/tune` with `target_preset=N` to deliberately overwrite that one slot instead of scratch — your other emergency channels stay intact.
 - **Channel library** — groups of channels (Aviation, Marine VHF, SATCOM, whatever). Collapsible per-group cards in the UI with delete. SQLite-backed. CSV importer auto-detects three schemas:
   - FLTSAT band-plan style (`Downlink`, `Uplink`, `Name`)
   - Chirp/ham-radio export (`Receive Frequency`, `Transmit Frequency`, `Operating Mode`, `Name`, `Step`, `CTCSS`)
@@ -74,6 +75,10 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 
 Then set `URC_PORT=/dev/urc200-serial` and the PL2303 can enumerate as anything without breaking things.
 
+### Pick a scratch preset slot (optional)
+
+`URC_SCRATCH_PRESET` (default `9`, accepts `0..=9`) tells the server which preset slot to use as the "software scratch." Every UI tune lands here and the radio's TX-time preset-recall picks up that EEPROM content cleanly. See [Preset model](#preset-model-scratch-slot--emergency-channels) for the full rationale. If you'd rather burn `P0` as scratch (because your emergency channels are P1–P9 in your head), set `URC_SCRATCH_PRESET=0`.
+
 ### Tell ModemManager to leave the PL2303 alone (do this — it bites)
 
 On Linux distros that ship `ModemManager` (NetworkManager + MM is the default on Ubuntu, Debian desktop, DragonOS, most others), MM auto-probes every newly enumerated USB-serial device with AT commands to identify GSM/3G modems. One of those probes is `ATI` ("identify"). The literal `I` byte that lands on the wire is the URC-200's `ChannelInit` command — it wipes every preset back to 225 MHz / AM / Lo. **Symptom:** every time the urc200-server container restarts, the device-permissions cycle fires a udev `change` event, MM pounces, and the radio's presets vanish without a visible reboot.
@@ -96,6 +101,28 @@ mmcli -L                                                # must NOT list the radi
 ```
 
 If you use a different USB-serial chip (FTDI / CH340 / CP210x / etc.), swap the VID:PID — they're all probed by default. Vendor:product pairs of common offenders: FTDI FT232 `0403:6001`, CH340 `1a86:7523`, CP210x `10c4:ea60`. Same rule pattern, same effect.
+
+## Preset model: scratch slot + emergency channels
+
+The URC-200's firmware re-loads the active preset's stored EEPROM contents into the synth on every TX entry (the `B` command). Volatile RAM tunes — anything you set with `R`/`T`/`M` but didn't `Q` — get blown away the moment you key up. That's the radio doing what mil radios do; you can't disable it. **Symptom if you don't handle it:** tune to 156.575 MHz, key up, watch the freq snap to whatever the active preset has stored — often factory 225 MHz / AM / Lo.
+
+HammerHead handles this by reserving **one preset slot as the "scratch"** (default `P9`, configurable via `URC_SCRATCH_PRESET=0..=9`). Every software-initiated tune routes through this slot:
+
+```
+P{scratch}          ; park the radio on the scratch slot
+R{rx_khz}           ; set RX in RAM
+T{tx_khz}           ; set TX in RAM
+M{0|1}              ; set modulation in RAM (optional)
+Q                   ; persist RAM to scratch's EEPROM
+```
+
+After that sequence, the scratch slot's EEPROM already mirrors the intended tune, so the firmware's TX-time recall is a no-op. The remaining nine preset slots (P0–P8 by default) are **never touched by the tune funnel** — they behave as a fixed library of emergency channels. Pick one with the preset button row, and the radio recalls exactly what's saved.
+
+**To save a scratch tune to a specific emergency slot:** click "Save to preset…" then the target slot. The UI calls `/api/command/tune` with `target_preset=N` to deliberately overwrite slot `N` instead of scratch.
+
+**The library scanner stays out of this funnel.** Scanning is RX-only and a `Q` per step would burn EEPROM cycles fast. While scanning, the radio's active preset stays whatever it was; if you stop on a hit and want to TX on that channel, re-tune it from the library so the scratch slot picks it up.
+
+The same rationale applies to any other USB-serial-attached radio you eventually drive from this codebase — the next driver (PRC-117, etc.) inherits this design and just needs to point at its own scratch slot.
 
 ## Architecture
 
@@ -144,7 +171,7 @@ Crates that are intentionally **not** default workspace members (so `cargo build
 
 ```
 GET  /api/health
-GET  /api/features              { sdr: bool } — lets the UI show/hide feature-gated affordances
+GET  /api/features              { sdr: bool, scratch_preset: u8 } — feature flags + which slot is scratch
 GET  /api/ws/telemetry          typed JSON events (RSSI, squelch, mode, preset, general, synth_lock)
 GET  /api/ws/control            PTT protocol (hello, ptt_start, ptt_heartbeat, ptt_stop)
 GET  /api/ws/audio/rx           S16LE 48 kHz mono, binary frames + JSON header
@@ -161,7 +188,9 @@ POST /api/command/power/:p      lo|med|hi
 POST /api/command/scan/:s       on|off
 POST /api/command/scan_list_member/:s on|off
 POST /api/command/store         Q — EEPROM save
-POST /api/command/tune          { rx_hz, tx_hz, mode?, step? }
+POST /api/command/tune          { rx_hz, tx_hz, mode?, step?, target_preset? }
+                                Routes through the scratch slot by default (see Preset model).
+                                `target_preset: 0..=9` overrides scratch — used by "Save to preset N".
 GET  /api/channels              list (?group=X filter)
 GET  /api/channels/groups       list groups + counts
 POST /api/channels/import       upload CSV text body, ?group=Name
