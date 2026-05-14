@@ -38,7 +38,7 @@ fn default_dwell() -> u64 {
     3000
 }
 fn default_settle() -> u64 {
-    200
+    500
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
