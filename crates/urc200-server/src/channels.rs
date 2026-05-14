@@ -239,6 +239,11 @@ async fn tune_channel(State(s): State<AppState>, Path(id): Path<i64>) -> Respons
     // Auto-apply CTCSS from the channel definition (or clear it if the channel
     // has no tone). Mirrors what an inline hardware CTCSS encoder would do.
     s.audio_tx.ctcss.set(ch.ctcss_hz);
+    // Flip the radio to CT for CTCSS channels, back to PT otherwise. PT's
+    // 300 Hz–3 kHz audio bandpass strips sub-audible tones before the
+    // modulator; CT's 30 Hz–10.24 kHz path passes them. See
+    // `couple_text_mode_to_ctcss` for the full rationale.
+    crate::couple_text_mode_to_ctcss(&s.radio, ch.ctcss_hz.is_some()).await;
     // Announce the CTCSS change so any other browser's UI reflects it.
     s.emit_state(s.ctcss_snapshot());
 

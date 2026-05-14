@@ -80,6 +80,7 @@
   .preset:hover { border-color: var(--accent); }
   .preset.active { border-color: var(--accent); background: rgba(255,179,0,0.1); color: var(--accent); }
   .preset.scratch { border-style: dashed; }
+  #text-mode-toggle.ct-active { border-color: var(--accent); color: var(--accent); background: rgba(255,179,0,0.08); }
   .preset.scratch .scratch-tag { display: block; font-size: 9px; letter-spacing: 0.05em; color: var(--muted); margin-top: 2px; }
   .save-arm .preset { border-color: var(--warn); background: rgba(240,160,32,0.07); animation: save-pulse 1s ease-in-out infinite; }
   @keyframes save-pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(240,160,32,0); } 50% { box-shadow: 0 0 0 2px rgba(240,160,32,0.3); } }
@@ -362,6 +363,11 @@
           <input type="number" id="ctcss-amp" min="500" max="20000" step="500" value="3200" style="width:80px">
         </div>
         <div class="muted" id="ctcss-state" style="font-size:10px; margin-top:3px">off</div>
+        <div style="display:flex; gap:8px; align-items:center; margin-top:8px; flex-wrap:wrap;">
+          <span class="muted" style="font-size:11px;">TX path:</span>
+          <button id="text-mode-toggle" class="bare" style="padding:4px 12px; font-size:11px;" title="PT = voice mode, 300 Hz–3 kHz audio bandpass (strips CTCSS). CT = wider audio path, 30 Hz–10.24 kHz, passes CTCSS. Auto-switched when CTCSS turns on/off; click to override manually.">PT</button>
+          <span class="muted" style="font-size:10px;">auto-flips to CT when CTCSS is armed</span>
+        </div>
       </div>
       <div style="margin-top:12px; border-top:1px solid var(--line); padding-top:10px;">
         <div class="muted" style="margin-bottom:6px">DSP — applied server-side (biquad HPF → noise gate → LPF)</div>
@@ -657,6 +663,7 @@ mkWS("/api/ws/telemetry", (e) => {
       renderBadges({ text_mode: ev.text_mode, lamp: ev.lamp, speaker_on: ev.speaker_on });
       syncSegmented("seg-lamp", ev.lamp);
       syncSegmented("seg-speaker", ev.speaker_on ? "on" : "off");
+      updateTextModeToggle(ev.text_mode);
       break;
     }
     case "preset": {
@@ -1052,6 +1059,31 @@ fetch("/api/tx/ctcss").then(r => r.json()).then(j => {
     ctcssState.textContent = "off";
   }
 }).catch(() => {});
+
+// =============================================================
+// TX text mode toggle (PT/CT)
+// =============================================================
+// PT (Plain Text) has a 300 Hz–3 kHz audio bandpass per manual §3.2.2;
+// every standard EIA CTCSS tone (67–254 Hz) sits below that and is
+// stripped before the modulator. CT (Cipher Text) opens the path to
+// 30 Hz–10.24 kHz so the tone survives. The server auto-flips CT/PT
+// when CTCSS arms/disarms (in channels.rs::tune_channel and main.rs::
+// set_ctcss); this button reflects the current state from telemetry
+// and lets the operator override manually.
+const textModeToggle = document.getElementById("text-mode-toggle");
+let textModeCurrent = null;
+function updateTextModeToggle(mode) {
+  textModeCurrent = mode;
+  if (!textModeToggle) return;
+  textModeToggle.textContent = (mode || "?").toUpperCase();
+  textModeToggle.classList.toggle("ct-active", mode === "ct");
+}
+textModeToggle.onclick = () => {
+  // Manual override. The server's CTCSS-coupling will re-assert PT/CT
+  // the next time CTCSS state changes — that's by design.
+  const next = textModeCurrent === "ct" ? "pt" : "ct";
+  apiPost(`/api/command/text/${next}`);
+};
 
 // =============================================================
 // Audio filters (HPF / LPF / noise gate, server-side)

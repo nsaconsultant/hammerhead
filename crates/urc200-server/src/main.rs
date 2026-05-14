@@ -324,6 +324,28 @@ struct CtcssReq {
     amplitude: Option<u16>,
 }
 
+/// Keep the radio's text mode (PT/CT) coupled to whether CTCSS is enabled.
+///
+/// The URC-200's Plain Text audio path has a 300 Hz–3 kHz bandpass (manual
+/// §3.2.2) — every standard EIA CTCSS tone (67–254 Hz) sits below the lower
+/// cutoff and gets stripped before the modulator. Cipher Text mode opens the
+/// path up to 30 Hz–10.24 kHz, which passes the tone cleanly. CT was designed
+/// for external crypto data but there's no encryption stage inside the radio,
+/// so voice (or voice + sub-audible tone) just gets FM-modulated through the
+/// wider audio path.
+///
+/// Best-effort: don't surface failure here; the parent operation (channel
+/// tune, CTCSS update) has already succeeded and we'd rather take a missed
+/// `X0`/`X1` than fail an HTTP call that otherwise worked.
+pub(crate) async fn couple_text_mode_to_ctcss(radio: &urc200_serial::Radio, ctcss_enabled: bool) {
+    let cmd = if ctcss_enabled {
+        OpCommand::Text(TextMode::Ct)
+    } else {
+        OpCommand::Text(TextMode::Pt)
+    };
+    let _ = radio.send(cmd).await;
+}
+
 async fn get_ctcss(State(s): State<AppState>) -> Json<CtcssState> {
     let (enabled, freq_hz, amplitude) = s.audio_tx.ctcss.get();
     Json(CtcssState {
@@ -339,6 +361,9 @@ async fn set_ctcss(State(s): State<AppState>, Json(req): Json<CtcssReq>) -> Json
         s.audio_tx.ctcss.set_amplitude(a);
     }
     let (enabled, freq_hz, amplitude) = s.audio_tx.ctcss.get();
+    // Couple radio text mode to CTCSS state — see couple_text_mode_to_ctcss
+    // doc for why PT eats the sub-audible tone.
+    couple_text_mode_to_ctcss(&s.radio, enabled).await;
     s.emit_state(s.ctcss_snapshot());
     Json(CtcssState {
         enabled,
