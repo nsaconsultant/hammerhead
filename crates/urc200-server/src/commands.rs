@@ -7,6 +7,7 @@
 //! from code): `B`, `*1`, `I`, `K`. These commands are absent from this
 //! module and no other HTTP route produces them.
 
+use crate::tune::tune_via_scratch;
 use crate::AppState;
 use axum::{
     extract::{Path, State},
@@ -255,13 +256,22 @@ pub struct TuneRequest {
     pub mode: Option<String>,
     /// One of: "25k", "12.5k", "5k". Defaults to "5k" (finest common grid).
     pub step: Option<String>,
+    /// Override the scratch slot for this single tune — used by the
+    /// "Save to preset N" UX which deliberately wants to write to an
+    /// emergency-preset slot. Omit (or `null`) to route through the
+    /// configured scratch slot (the default for library tunes).
+    pub target_preset: Option<u8>,
 }
 
 #[derive(Serialize)]
 pub struct TuneReply {
+    /// Which preset slot the radio is now parked on (the scratch slot).
+    pub parked_preset: u8,
+    pub preset: CommandReply,
     pub rx: CommandReply,
     pub tx: CommandReply,
     pub mode: Option<CommandReply>,
+    pub store: CommandReply,
 }
 
 async fn post_tune(
@@ -289,31 +299,52 @@ async fn post_tune(
         Ok(f) => f,
         Err(e) => return bad(format!("tx_hz invalid: {e}")),
     };
+    let mode = match req.mode.as_deref() {
+        None => None,
+        Some(m) => match parse_mod(m) {
+            Some(mm) => Some(mm),
+            None => return bad("mode must be am/fm"),
+        },
+    };
+    let target = match req.target_preset {
+        None => s.scratch_preset,
+        Some(n) => match PresetId::new(n) {
+            Some(p) => p,
+            None => return bad("target_preset must be 0..=9"),
+        },
+    };
 
-    let rx_reply = match s.radio.send(OpCommand::SetRx(rx)).await {
-        Ok(r) => CommandReply::from_response(r).1,
-        Err(e) => return (StatusCode::SERVICE_UNAVAILABLE, format!("rx: {e}")).into_response(),
+    let stages = match tune_via_scratch(&s.radio, target, rx, tx, mode).await {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::SERVICE_UNAVAILABLE, format!("tune: {e}")).into_response(),
     };
-    let tx_reply = match s.radio.send(OpCommand::SetTx(tx)).await {
-        Ok(r) => CommandReply::from_response(r).1,
-        Err(e) => return (StatusCode::SERVICE_UNAVAILABLE, format!("tx: {e}")).into_response(),
-    };
-    let mode_reply = if let Some(m) = req.mode.as_deref() {
-        let Some(mm) = parse_mod(m) else {
-            return bad("mode must be am/fm");
-        };
-        match s.radio.send(OpCommand::ModTxRx(mm)).await {
-            Ok(r) => Some(CommandReply::from_response(r).1),
-            Err(e) => return (StatusCode::SERVICE_UNAVAILABLE, format!("mode: {e}")).into_response(),
+
+    // Pull out per-stage replies. Each stage tag is unique within the
+    // sequence so a tiny linear scan keeps the helper signature flat.
+    let mut preset_reply = None;
+    let mut rx_reply = None;
+    let mut tx_reply = None;
+    let mut mode_reply = None;
+    let mut store_reply = None;
+    for stage in stages {
+        let r = CommandReply::from_response(stage.response).1;
+        match stage.command {
+            "preset" => preset_reply = Some(r),
+            "rx" => rx_reply = Some(r),
+            "tx" => tx_reply = Some(r),
+            "mode" => mode_reply = Some(r),
+            "store" => store_reply = Some(r),
+            _ => {}
         }
-    } else {
-        None
-    };
+    }
 
     Json(TuneReply {
-        rx: rx_reply,
-        tx: tx_reply,
+        parked_preset: target.get(),
+        preset: preset_reply.expect("preset stage always present"),
+        rx: rx_reply.expect("rx stage always present"),
+        tx: tx_reply.expect("tx stage always present"),
         mode: mode_reply,
+        store: store_reply.expect("store stage always present"),
     })
     .into_response()
 }

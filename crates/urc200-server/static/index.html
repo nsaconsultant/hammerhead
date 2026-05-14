@@ -45,6 +45,9 @@
 
   .lcd { background: var(--lcd-bg); color: var(--lcd); padding: 18px 16px; border-radius: 6px; text-shadow: 0 0 6px rgba(255, 179, 0, 0.4); border: 1px solid #1f1908; cursor: ns-resize; user-select: none; }
   .lcd.dialing { outline: 1px dashed var(--accent); outline-offset: -2px; }
+  .lcd .channel-name { font-size: 14px; font-weight: 600; letter-spacing: 0.04em; color: var(--accent); margin-bottom: 6px; min-height: 1em; text-transform: uppercase; }
+  .lcd .channel-name:empty { display: none; }
+  .lcd .channel-name.scan { color: var(--warn); }
   .lcd .primary { font-size: 34px; font-weight: 700; letter-spacing: 0.03em; line-height: 1; font-variant-numeric: tabular-nums; }
   .lcd .secondary { font-size: 13px; color: var(--fg-dim); margin-top: 6px; }
   .lcd .badge-row { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
@@ -76,6 +79,8 @@
   .preset { background: var(--panel-hi); border: 1px solid var(--line); color: var(--fg); font-family: inherit; font-size: 13px; padding: 12px 4px; border-radius: 6px; cursor: pointer; transition: border-color 0.15s, background 0.15s; min-height: 52px; }
   .preset:hover { border-color: var(--accent); }
   .preset.active { border-color: var(--accent); background: rgba(255,179,0,0.1); color: var(--accent); }
+  .preset.scratch { border-style: dashed; }
+  .preset.scratch .scratch-tag { display: block; font-size: 9px; letter-spacing: 0.05em; color: var(--muted); margin-top: 2px; }
   .save-arm .preset { border-color: var(--warn); background: rgba(240,160,32,0.07); animation: save-pulse 1s ease-in-out infinite; }
   @keyframes save-pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(240,160,32,0); } 50% { box-shadow: 0 0 0 2px rgba(240,160,32,0.3); } }
   .preset .n { font-size: 16px; font-weight: 700; display: block; }
@@ -289,6 +294,7 @@
     <div class="card">
       <h2>Active Channel</h2>
       <div class="lcd" id="lcd-dial" tabindex="0" title="scroll / drag / ↑↓ to tune · shift=×10 · ctrl=÷10">
+        <div class="channel-name" id="channel-name"></div>
         <div class="primary" id="freq-primary">—.————</div>
         <div class="secondary" id="freq-secondary">—</div>
         <div class="badge-row" id="badges"></div>
@@ -443,7 +449,7 @@
         </div>
       </div>
       <div class="muted" style="margin-top:8px; font-size:11px;">
-        writes to the current radio preset (RAM); power-cycle reverts. Use <code>POST /store</code> to persist.
+        tunes route through the scratch slot (<span id="scratch-slot-inline">P?</span>) and are auto-persisted — your saved presets stay untouched.
       </div>
     </div>
 
@@ -455,7 +461,7 @@
         <button id="store-btn" class="bare">Quick save (Q)</button>
       </div>
       <div id="save-hint" class="muted" style="margin-top:6px; font-size:11px;">
-        Tip: tune first (RX/TX/mode), then <b>Save to preset…</b> and click a slot — your current tune is written to that slot's EEPROM.
+        The dashed slot (<span id="scratch-slot-grid">P?</span>) is the software scratch — every <i>Tune</i> writes there so your other slots can be kept as fixed emergency channels.
       </div>
     </div>
   </div>
@@ -585,6 +591,25 @@ function mkWS(path, onMsg, stateEls, opts = {}) {
   }
   open();
   return h;
+}
+
+// =============================================================
+// Channel-name display (top line of the LCD)
+// =============================================================
+// The channel name is set when the user tunes from the library or while
+// the scanner is stepping. Manual tunes clear it because the radio is
+// no longer on a known library channel.
+function setChannelName(name, isScan) {
+  const el = document.getElementById("channel-name");
+  if (!el) return;
+  el.textContent = name || "";
+  el.classList.toggle("scan", !!isScan);
+}
+function clearChannelName() {
+  const el = document.getElementById("channel-name");
+  if (!el) return;
+  el.textContent = "";
+  el.classList.remove("scan");
 }
 
 // =============================================================
@@ -1105,6 +1130,7 @@ function dialKickPush() {
     if (dialRxMhz == null) return;
     const rx_hz = Math.round(dialRxMhz * 1e6);
     const tx_hz = rx_hz + Math.round(dialTxOffset);
+    clearChannelName(); // manual tune — no library channel applies
     await apiPost("/api/command/tune", { rx_hz, tx_hz, step: tuneStep.value });
     dialRxMhz = null;  // release control back to telemetry
   }, 180);
@@ -1213,22 +1239,20 @@ document.getElementById("store-btn").onclick = () => apiPost("/api/command/store
 async function saveToPreset(n) {
   if (!activeSnapshot) { logEvent("err", { msg: "no telemetry snapshot yet; wait a second" }); return; }
   const snap = activeSnapshot;
-  const wasDifferent = snap.preset !== n;
   logEvent("save-to-preset", { target: n, from: snap.preset, rx_mhz: snap.rx_mhz, tx_mhz: snap.tx_mhz, mode: snap.mod_tx_rx });
-  if (wasDifferent) {
-    // Switch to target slot — this loads ITS stored values into RAM (losing our tune).
-    await apiPost(`/api/command/preset/${n}`);
-    await new Promise(r => setTimeout(r, 150)); // small settle
-    // Re-apply the captured tune.
-    await apiPost(`/api/command/tune`, {
-      rx_hz: Math.round(snap.rx_mhz * 1e6),
-      tx_hz: Math.round(snap.tx_mhz * 1e6),
-      mode: snap.mod_tx_rx,
-      step: "5k",
-    });
-    await apiPost(`/api/command/power/${snap.power}`);
-    await apiPost(`/api/command/scan_list_member/${snap.on_scan_list ? "on" : "off"}`);
-  }
+  // /tune with target_preset overrides the default scratch funnel so this
+  // single call deliberately writes to slot n (P{n} → R → T → M → Q).
+  await apiPost(`/api/command/tune`, {
+    rx_hz: Math.round(snap.rx_mhz * 1e6),
+    tx_hz: Math.round(snap.tx_mhz * 1e6),
+    mode: snap.mod_tx_rx,
+    step: "5k",
+    target_preset: n,
+  });
+  // Power + scan-list-member aren't covered by /tune, so apply them then Q
+  // again to flush those updates to P{n}'s EEPROM.
+  await apiPost(`/api/command/power/${snap.power}`);
+  await apiPost(`/api/command/scan_list_member/${snap.on_scan_list ? "on" : "off"}`);
   await apiPost(`/api/command/store`);
   logEvent("saved", { preset: n });
 }
@@ -1242,6 +1266,9 @@ for (let n = 0; n <= 9; n++) {
       setSaveMode(false);
       await saveToPreset(n);
     } else {
+      // Recalling an emergency preset — the radio is no longer on the
+      // library channel that the name slot was tracking.
+      clearChannelName();
       apiPost(`/api/command/preset/${n}`);
     }
   };
@@ -1286,6 +1313,7 @@ document.getElementById("tune-btn").onclick = async () => {
   if (!isFinite(rx) || !isFinite(tx)) { logEvent("err", { msg: "bad freq" }); return; }
   const body = { rx_hz: Math.round(rx * 1e6), tx_hz: Math.round(tx * 1e6), step: tuneStep.value };
   if (tuneMode.value) body.mode = tuneMode.value;
+  clearChannelName(); // manual tune — no library channel applies
   await apiPost("/api/command/tune", body);
 };
 
@@ -1400,7 +1428,10 @@ async function loadChannels() {
     // Tune / delete handlers (all tbodies share the same selectors).
     chTable.querySelectorAll("button[data-tune]:not([disabled])").forEach(b =>
       b.onclick = async () => {
-        await apiPost(`/api/channels/${b.dataset.tune}/tune`);
+        const reply = await apiPost(`/api/channels/${b.dataset.tune}/tune`);
+        if (reply && reply.channel && reply.channel.name) {
+          setChannelName(reply.channel.name);
+        }
         try {
           const j = await fetch("/api/tx/ctcss").then(r => r.json());
           if (j.enabled) {
@@ -1469,7 +1500,8 @@ async function apiPost(path, body) {
     const text = await r.text();
     let parsed; try { parsed = JSON.parse(text); } catch {}
     logEvent(r.ok ? "ok" : "err", { path, status: r.status, body: parsed ?? text });
-  } catch (e) { logEvent("err", { path, err: String(e) }); }
+    return r.ok ? (parsed ?? text) : undefined;
+  } catch (e) { logEvent("err", { path, err: String(e) }); return undefined; }
 }
 
 loadGroups();
@@ -1493,10 +1525,32 @@ let scanActive = false;
 
 // Reveal the Waterfall link only if the server was built with the `sdr`
 // feature — matches the optional-feature contract the Rust side enforces.
+// Also mark the scratch slot in the preset grid + inline tooltips.
 fetch("/api/features").then(r => r.ok ? r.json() : null).then(f => {
-  if (f && f.sdr) {
+  if (!f) return;
+  if (f.sdr) {
     const a = document.getElementById("wf-link");
     if (a) a.style.display = "inline-block";
+  }
+  if (typeof f.scratch_preset === "number") {
+    const n = f.scratch_preset;
+    const label = `P${n}`;
+    const inline = document.getElementById("scratch-slot-inline");
+    if (inline) inline.textContent = label;
+    const gridHint = document.getElementById("scratch-slot-grid");
+    if (gridHint) gridHint.textContent = label;
+    const btn = document.querySelector(`.preset[data-n="${n}"]`);
+    if (btn) {
+      btn.classList.add("scratch");
+      // Don't disturb the "P{n}" main label; append a tiny scratch tag.
+      if (!btn.querySelector(".scratch-tag")) {
+        const tag = document.createElement("span");
+        tag.className = "scratch-tag";
+        tag.textContent = "scratch";
+        btn.appendChild(tag);
+      }
+      btn.title = `Scratch slot — every /api/command/tune writes here automatically.`;
+    }
   }
 }).catch(() => {});
 
@@ -1551,17 +1605,32 @@ function openScanWs() {
         setScanActive(true);
         scanStatus.textContent = `scanning ${ev.total} · group ${ev.group ?? "(all)"}`;
         break;
-      case "tuned":
+      case "tuned": {
         scanCurrent.innerHTML = `<b>${escape(ev.name)}</b> · ${ev.rx_mhz.toFixed(4)} MHz <span class="muted" style="font-size:11px">(${ev.idx + 1}/${ev.total})</span>`;
+        // Drive the main display directly off the scan event so it doesn't
+        // wait for the next ?10 poll (which can lag 500ms behind a fast
+        // dwell). Mode/badges will catch up via telemetry on their own.
+        setChannelName(ev.name, /*scan=*/true);
+        document.getElementById("freq-primary").textContent = ev.rx_mhz.toFixed(4);
+        const simplex = Math.abs(ev.tx_mhz - ev.rx_mhz) < 0.0005;
+        document.getElementById("freq-secondary").textContent = simplex
+          ? `simplex · scan ${ev.idx + 1}/${ev.total}`
+          : `tx ${ev.tx_mhz.toFixed(4)} · scan ${ev.idx + 1}/${ev.total}`;
         break;
+      }
       case "hit":
         addHit(ev);
         scanStatus.textContent = `HIT on ${ev.name}`;
         break;
-      case "stopped":
+      case "stopped": {
         setScanActive(false);
         scanStatus.textContent = `stopped (${ev.reason})`;
+        // Drop the "scan" coloring; whatever the scanner last tuned stays
+        // on screen until the user retunes.
+        const nameEl = document.getElementById("channel-name");
+        if (nameEl) nameEl.classList.remove("scan");
         break;
+      }
       case "error":
         logEvent("scan err", ev);
         break;

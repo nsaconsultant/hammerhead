@@ -20,8 +20,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::{info, warn};
-use urc200_proto::{Band, Freq, ModMode, OpCommand, Step};
-use urc200_serial::RadioError;
+use urc200_proto::{Band, Freq, ModMode, Step};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -135,9 +134,13 @@ async fn delete_group(State(s): State<AppState>, Path(name): Path<String>) -> Re
 #[derive(Serialize)]
 struct TuneReply {
     channel: Channel,
+    /// Which preset slot the radio is now parked on (the scratch slot).
+    parked_preset: u8,
+    preset: CommandStatus,
     rx: CommandStatus,
     tx: CommandStatus,
     mode: Option<CommandStatus>,
+    store: CommandStatus,
 }
 
 #[derive(Serialize)]
@@ -184,30 +187,54 @@ async fn tune_channel(State(s): State<AppState>, Path(id): Path<i64>) -> Respons
         Err(e) => return (StatusCode::BAD_REQUEST, format!("tx: {e}")).into_response(),
     };
 
-    let rx_status = send_and_tag(&s, OpCommand::SetRx(rx)).await;
-    if let Err(e) = rx_status.as_err() {
-        return (StatusCode::SERVICE_UNAVAILABLE, format!("rx: {e}")).into_response();
-    }
-    let tx_status = send_and_tag(&s, OpCommand::SetTx(tx)).await;
-    if let Err(e) = tx_status.as_err() {
-        return (StatusCode::SERVICE_UNAVAILABLE, format!("tx: {e}")).into_response();
-    }
-    let mode_status = if let Some(m) = ch.mode.as_deref() {
-        let Some(mm) = parse_mode(m) else {
-            return (
-                StatusCode::BAD_REQUEST,
-                format!("unknown mode {:?}", m),
-            )
-                .into_response();
-        };
-        let r = send_and_tag(&s, OpCommand::ModTxRx(mm)).await;
-        if let Err(e) = r.as_err() {
-            return (StatusCode::SERVICE_UNAVAILABLE, format!("mode: {e}")).into_response();
-        }
-        Some(r.status)
-    } else {
-        None
+    let mode_opt = match ch.mode.as_deref() {
+        None => None,
+        Some(m) => match parse_mode(m) {
+            Some(mm) => Some(mm),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("unknown mode {:?}", m),
+                )
+                    .into_response();
+            }
+        },
     };
+
+    let stages = match crate::tune::tune_via_scratch(&s.radio, s.scratch_preset, rx, tx, mode_opt)
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::SERVICE_UNAVAILABLE, format!("tune: {e}")).into_response(),
+    };
+
+    // Lift each stage's Response into the channels.rs CommandStatus shape.
+    let to_status = |r: &urc200_proto::Response| CommandStatus {
+        ok: !r.is_nak(),
+        response_kind: if r.is_nak() {
+            "nak"
+        } else if r.is_ht() {
+            "ht"
+        } else {
+            "ack"
+        },
+    };
+    let mut preset_status = None;
+    let mut rx_status = None;
+    let mut tx_status = None;
+    let mut mode_status = None;
+    let mut store_status = None;
+    for stage in &stages {
+        let st = to_status(&stage.response);
+        match stage.command {
+            "preset" => preset_status = Some(st),
+            "rx" => rx_status = Some(st),
+            "tx" => tx_status = Some(st),
+            "mode" => mode_status = Some(st),
+            "store" => store_status = Some(st),
+            _ => {}
+        }
+    }
 
     // Auto-apply CTCSS from the channel definition (or clear it if the channel
     // has no tone). Mirrors what an inline hardware CTCSS encoder would do.
@@ -217,58 +244,14 @@ async fn tune_channel(State(s): State<AppState>, Path(id): Path<i64>) -> Respons
 
     Json(TuneReply {
         channel: ch,
-        rx: rx_status.status,
-        tx: tx_status.status,
+        parked_preset: s.scratch_preset.get(),
+        preset: preset_status.expect("preset stage always present"),
+        rx: rx_status.expect("rx stage always present"),
+        tx: tx_status.expect("tx stage always present"),
         mode: mode_status,
+        store: store_status.expect("store stage always present"),
     })
     .into_response()
-}
-
-struct SendResult {
-    status: CommandStatus,
-    err: Option<String>,
-}
-
-impl SendResult {
-    fn as_err(&self) -> std::result::Result<(), String> {
-        match &self.err {
-            Some(e) => Err(e.clone()),
-            None => Ok(()),
-        }
-    }
-}
-
-async fn send_and_tag(s: &AppState, cmd: OpCommand) -> SendResult {
-    match s.radio.send(cmd).await {
-        Ok(r) if r.is_nak() => SendResult {
-            status: CommandStatus {
-                ok: false,
-                response_kind: "nak",
-            },
-            err: None, // NAK is a soft failure; let the caller decide
-        },
-        Ok(_) => SendResult {
-            status: CommandStatus {
-                ok: true,
-                response_kind: "ack",
-            },
-            err: None,
-        },
-        Err(RadioError::Timeout(d)) => SendResult {
-            status: CommandStatus {
-                ok: false,
-                response_kind: "timeout",
-            },
-            err: Some(format!("timeout after {d:?}")),
-        },
-        Err(e) => SendResult {
-            status: CommandStatus {
-                ok: false,
-                response_kind: "error",
-            },
-            err: Some(format!("{e}")),
-        },
-    }
 }
 
 // ===== CSV parsing =====

@@ -22,6 +22,7 @@ mod ptt;
 mod scan;
 #[cfg(feature = "sdr")]
 mod sdr_routes;
+mod tune;
 
 use anyhow::{Context, Result};
 use axum::{
@@ -42,7 +43,8 @@ use tokio::sync::broadcast;
 use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing::{info, warn};
 use urc200_proto::{
-    LampLevel, Mode, ModMode, OpCommand, PowerLevel, Rssi, SquelchStatus, SynthLock, TextMode,
+    LampLevel, Mode, ModMode, OpCommand, PowerLevel, PresetId, Rssi, SquelchStatus, SynthLock,
+    TextMode,
 };
 use urc200_serial::{
     Poller, Radio, SerialConfig, SerialTransport, TelemetryUpdate, DEFAULT_TIMEOUT,
@@ -67,6 +69,12 @@ struct AppState {
     audio: AudioCapture,
     audio_tx: AudioTx,
     scanner: ScannerHandle,
+    /// Reserved preset slot used as the "scratch" target for every
+    /// software-initiated tune (manual dial + library channel tune). Lets the
+    /// operator keep P0..=P8 (or wherever the scratch isn't) as a stable
+    /// emergency-channel library without the radio's TX-time preset-recall
+    /// wiping their volatile tune. See `tune::tune_via_scratch`.
+    scratch_preset: PresetId,
     #[cfg(feature = "sdr")]
     sdr: sdr_routes::SdrHandle,
 }
@@ -207,6 +215,9 @@ async fn main() -> Result<()> {
 
     let (state_events, _) = broadcast::channel::<serde_json::Value>(64);
 
+    let scratch_preset = tune::scratch_preset_from_env();
+    info!(scratch = scratch_preset.get(), "scratch preset slot configured");
+
     let state = AppState {
         radio: radio_handle.radio.clone(),
         telemetry: poller.sender(),
@@ -216,6 +227,7 @@ async fn main() -> Result<()> {
         audio: audio.clone(),
         audio_tx: audio_tx.clone(),
         scanner: scanner_handle.clone(),
+        scratch_preset,
         #[cfg(feature = "sdr")]
         sdr,
     };
@@ -596,11 +608,13 @@ async fn health(State(_state): State<AppState>) -> Json<HealthPayload> {
 #[derive(Serialize)]
 struct FeaturesPayload {
     sdr: bool,
+    scratch_preset: u8,
 }
 
-async fn features(State(_state): State<AppState>) -> Json<FeaturesPayload> {
+async fn features(State(state): State<AppState>) -> Json<FeaturesPayload> {
     Json(FeaturesPayload {
         sdr: cfg!(feature = "sdr"),
+        scratch_preset: state.scratch_preset.get(),
     })
 }
 
