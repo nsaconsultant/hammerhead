@@ -74,6 +74,29 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 
 Then set `URC_PORT=/dev/urc200-serial` and the PL2303 can enumerate as anything without breaking things.
 
+### Tell ModemManager to leave the PL2303 alone (do this — it bites)
+
+On Linux distros that ship `ModemManager` (NetworkManager + MM is the default on Ubuntu, Debian desktop, DragonOS, most others), MM auto-probes every newly enumerated USB-serial device with AT commands to identify GSM/3G modems. One of those probes is `ATI` ("identify"). The literal `I` byte that lands on the wire is the URC-200's `ChannelInit` command — it wipes every preset back to 225 MHz / AM / Lo. **Symptom:** every time the urc200-server container restarts, the device-permissions cycle fires a udev `change` event, MM pounces, and the radio's presets vanish without a visible reboot.
+
+Add the udev rule that flags Prolific PL2303 chips as "not a modem" so MM skips them:
+
+```bash
+echo 'ACTION=="add|change", SUBSYSTEMS=="usb", ATTRS{idVendor}=="067b", ATTRS{idProduct}=="2303", ENV{ID_MM_DEVICE_IGNORE}="1"' \
+  | sudo tee /etc/udev/rules.d/99-urc200-pl2303-mm-ignore.rules
+sudo udevadm control --reload
+sudo udevadm trigger --action=change /sys/class/tty/ttyUSB0   # or your actual tty
+sudo systemctl restart ModemManager
+```
+
+Verify:
+
+```bash
+udevadm info -q property -n /dev/ttyUSB0 | grep ID_MM   # should show ID_MM_DEVICE_IGNORE=1
+mmcli -L                                                # must NOT list the radio's PL2303
+```
+
+If you use a different USB-serial chip (FTDI / CH340 / CP210x / etc.), swap the VID:PID — they're all probed by default. Vendor:product pairs of common offenders: FTDI FT232 `0403:6001`, CH340 `1a86:7523`, CP210x `10c4:ea60`. Same rule pattern, same effect.
+
 ## Architecture
 
 ```
